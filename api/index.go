@@ -18,7 +18,6 @@ import (
 )
 
 var (
-	once     sync.Once
 	provider *shopee.Provider
 	svc      *payment.Service
 	session  shopee.Session
@@ -112,7 +111,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
-func handleHealth(w http.ResponseWriter, r *http.Request) {
+func handleHealth(w http.ResponseWriter, _ *http.Request) {
 	p, _, err := getProvider()
 	if err != nil {
 		jsonResponse(w, http.StatusOK, map[string]any{
