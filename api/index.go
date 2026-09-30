@@ -88,27 +88,25 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	path := r.URL.Path
-
-	// Health check endpoint
-	if path == "/health" || path == "/api/health" || path == "/" {
-		handleHealth(w, r)
-		return
+	path := strings.ToLower(r.URL.Path)
+	if matched := r.Header.Get("x-matched-path"); matched != "" {
+		path = strings.ToLower(matched)
 	}
 
-	// Create payment endpoint
-	if (path == "/api/payments" || path == "/payments") && r.Method == http.MethodPost {
+	// Create payment endpoint (POST)
+	if strings.Contains(path, "payment") && r.Method == http.MethodPost {
 		handleCreatePayment(w, r)
 		return
 	}
 
-	// Get payment status endpoint
-	if strings.HasPrefix(path, "/api/payments") || strings.HasPrefix(path, "/payments") {
+	// Get payment status endpoint (GET)
+	if strings.Contains(path, "payment") && r.Method == http.MethodGet {
 		handleGetPayment(w, r)
 		return
 	}
 
-	http.NotFound(w, r)
+	// Health check endpoint (Default for /, /health, /api/health, /api/index)
+	handleHealth(w, r)
 }
 
 func handleHealth(w http.ResponseWriter, _ *http.Request) {
