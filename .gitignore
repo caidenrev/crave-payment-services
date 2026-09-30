@@ -1,12 +1,11 @@
 # Binaries
-paymentgt
-paymentgt.exe
-paygateme-tui
-paygateme-login
-tui
-gateway
-server
-zeffserver
+/paymentgt
+/paymentgt.exe
+/paygateme-tui
+/paygateme-login
+/tui
+/gateway
+/zeffserver
 *.exe
 
 # Sensitive session files & secrets (cookies/tokens)
