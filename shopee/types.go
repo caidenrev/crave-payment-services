@@ -146,11 +146,3 @@ type LoginOutcome struct {
 	Verification *OtpVerification  `json:"verification,omitempty"`
 	Merchants    []MerchantSummary `json:"merchants,omitempty"`
 }
-
-// merchantCredential is the decoded dashboard JWT payload.
-type merchantCredential struct {
-	Token      string
-	AccountID  string
-	BusinessID string
-	ExpiresAt  int64
-}
