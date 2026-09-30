@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/hirotomasato/paygateme/payment"
+	"github.com/hirotomasato/paygateme/qris"
 	"github.com/hirotomasato/paygateme/shopee"
 	"github.com/hirotomasato/paygateme/utils"
 	"rsc.io/qr"
@@ -157,57 +159,74 @@ func handleCreatePayment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	now := time.Now()
 	if req.OrderID == "" {
-		req.OrderID = fmt.Sprintf("ORD-%d", time.Now().Unix())
+		req.OrderID = fmt.Sprintf("ORD-%d", now.Unix())
 	}
 
-	_, service, err := getProvider()
-	if err != nil {
-		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-
-	expiry := 10 * time.Minute
+	expiryMinutes := 10
 	if req.ExpiresInMinutes > 0 && req.ExpiresInMinutes <= 60 {
-		expiry = time.Duration(req.ExpiresInMinutes) * time.Minute
+		expiryMinutes = req.ExpiresInMinutes
 	}
+	expiresAt := now.Add(time.Duration(expiryMinutes) * time.Minute)
 
-	pay, err := service.CreatePayment(r.Context(), payment.CreatePaymentInput{
-		Amount:    req.Amount,
-		Reference: req.OrderID,
-		ExpiresIn: expiry,
-		Metadata:  map[string]any{"order_id": req.OrderID},
-	})
+	p, service, err := getProvider()
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
+	}
+
+	staticQris := os.Getenv("STATIC_QRIS")
+	if staticQris == "" {
+		staticQris = "00020101021126610016ID.CO.SHOPEE.WWW01189360091800237970570208237970570303UMI51440014ID.CO.QRIS.WWW0215ID10266049176290303UMI5204572253033605802ID5923Crave Solutions Service6007TANGSEL61051531262070703A016304351F"
+	}
+
+	dynamicQR, err := qris.StaticToDynamicQris(staticQris, req.Amount)
+	if err != nil {
+		// Fallback to service if helper error
+		if service != nil {
+			pay, errSvc := service.CreatePayment(r.Context(), payment.CreatePaymentInput{
+				Amount:    req.Amount,
+				Reference: req.OrderID,
+				ExpiresIn: time.Duration(expiryMinutes) * time.Minute,
+			})
+			if errSvc == nil {
+				dynamicQR = pay.QRString
+			}
+		}
 	}
 
 	qrB64 := ""
-	if pay.QRString != "" {
-		code, err := qr.Encode(pay.QRString, qr.M)
+	if dynamicQR != "" {
+		code, err := qr.Encode(dynamicQR, qr.M)
 		if err == nil {
 			qrB64 = "data:image/png;base64," + base64.StdEncoding.EncodeToString(code.PNG())
 		}
 	}
 
+	// Stateless self-describing payment ID: pay_<amount>_<unix>_<nonce>
+	randSuffix := fmt.Sprintf("%x", time.Now().UnixNano()%1000000)
+	paymentID := fmt.Sprintf("pay_%d_%d_%s", req.Amount, now.Unix(), randSuffix)
+
+	_ = p // provider active
+
 	jsonResponse(w, http.StatusCreated, map[string]any{
 		"success":           true,
-		"payment_id":        pay.ID,
-		"order_id":          pay.Reference,
-		"amount":            pay.BaseAmount,
-		"unique_amount":     pay.UniqueAmount,
-		"unique_offset":     pay.UniqueOffset,
-		"status":            string(pay.Status),
-		"qris_string":       pay.QRString,
+		"payment_id":        paymentID,
+		"order_id":          req.OrderID,
+		"amount":            req.Amount,
+		"unique_amount":     req.Amount,
+		"unique_offset":     0,
+		"status":            "pending",
+		"qris_string":       dynamicQR,
 		"qris_image_base64": qrB64,
-		"expires_at":        pay.ExpiresAt,
-		"created_at":        pay.CreatedAt,
+		"expires_at":        expiresAt,
+		"created_at":        now,
 	})
 }
 
 func handleGetPayment(w http.ResponseWriter, r *http.Request) {
-	_, service, err := getProvider()
+	p, _, err := getProvider()
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
@@ -222,41 +241,77 @@ func handleGetPayment(w http.ResponseWriter, r *http.Request) {
 		id = r.URL.Query().Get("id")
 	}
 
-	// Trigger on-demand reconciliation against Shopee API
-	_, _ = service.Tick(r.Context())
-
 	if id == "" {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "payment_id required"})
 		return
 	}
 
-	pay, err := service.GetPayment(r.Context(), id)
-	if err != nil || pay == nil {
-		// If not in in-memory map, check active list or query Shopee
+	// Parse target amount and creation time from self-describing payment ID or query params
+	var targetAmount int64
+	createdAt := time.Now().Add(-10 * time.Minute)
+
+	if qAmount := r.URL.Query().Get("amount"); qAmount != "" {
+		if a, err := strconv.ParseInt(qAmount, 10, 64); err == nil {
+			targetAmount = a
+		}
+	}
+
+	parts := strings.Split(id, "_")
+	if len(parts) >= 3 && parts[0] == "pay" {
+		if a, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
+			targetAmount = a
+		}
+		if u, err := strconv.ParseInt(parts[2], 10, 64); err == nil {
+			createdAt = time.Unix(u, 0)
+		}
+	}
+
+	// Query real-time Shopee transaction feed around the payment creation window
+	searchStart := createdAt.Add(-3 * time.Minute)
+	searchEnd := time.Now().Add(3 * time.Minute)
+
+	txs, err := p.GetRecentTransactions(r.Context(), searchStart, searchEnd)
+	if err == nil {
+		for _, tx := range txs {
+			// Check if matching amount and transaction occurred around/after payment creation
+			amountMatches := (targetAmount == 0 || tx.Amount == targetAmount)
+			timeMatches := tx.Time.After(createdAt.Add(-60 * time.Second))
+
+			if amountMatches && timeMatches {
+				jsonResponse(w, http.StatusOK, map[string]any{
+					"success":        true,
+					"payment_id":     id,
+					"order_id":       tx.OrderID,
+					"amount":         tx.Amount,
+					"unique_amount":  tx.Amount,
+					"status":         "PAID",
+					"paid_at":        tx.Time,
+					"transaction_id": tx.ID,
+					"payment_type":   tx.PaymentType,
+				})
+				return
+			}
+		}
+	}
+
+	// If no completed transaction found yet, check expiry (10 min)
+	if time.Now().After(createdAt.Add(12 * time.Minute)) {
 		jsonResponse(w, http.StatusOK, map[string]any{
-			"success":    true,
-			"payment_id": id,
-			"status":     "pending",
+			"success":       true,
+			"payment_id":    id,
+			"unique_amount": targetAmount,
+			"status":        "EXPIRED",
 		})
 		return
 	}
 
-	res := map[string]any{
+	// Still waiting for payment
+	jsonResponse(w, http.StatusOK, map[string]any{
 		"success":       true,
-		"payment_id":    pay.ID,
-		"order_id":      pay.Reference,
-		"unique_amount": pay.UniqueAmount,
-		"status":        string(pay.Status),
-		"expires_at":    pay.ExpiresAt,
-	}
-
-	if pay.Transaction != nil {
-		res["paid_at"] = pay.Transaction.Time
-		res["transaction_id"] = pay.Transaction.ID
-		res["payment_type"] = pay.Transaction.PaymentType
-	}
-
-	jsonResponse(w, http.StatusOK, res)
+		"payment_id":    id,
+		"unique_amount": targetAmount,
+		"status":        "PENDING",
+	})
 }
 
 func jsonResponse(w http.ResponseWriter, status int, data any) {

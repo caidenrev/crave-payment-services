@@ -522,6 +522,34 @@ func (p *Provider) ExportSession() *Session {
 	return &s
 }
 
+// GetRecentTransactions queries the raw Shopee transaction feed for a given time window.
+func (p *Provider) GetRecentTransactions(ctx context.Context, startTime, endTime time.Time) ([]core.MerchantTransaction, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.session == nil {
+		return nil, fmt.Errorf("session not initialized")
+	}
+	token, err := ReadMerchantCredential(p.http.Jar())
+	if err != nil {
+		return nil, err
+	}
+	feed := NewTransactionFeed(p.http, token.Token, p.session.Merchant.ID, p.session.StoreID, APILocale{}, p.logger)
+	res, err := feed.ListRecent(ctx, core.TransactionFeedQuery{
+		Scope: core.PaymentScope{
+			Provider:   ProviderID,
+			AccountID:  p.session.Merchant.ID,
+			MerchantID: p.session.StoreID,
+		},
+		StartTime: startTime,
+		EndTime:   endTime,
+		PageSize:  20,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return res.Transactions, nil
+}
+
 func (p *Provider) paymentScopeLocked() *core.PaymentScope {
 	if p.session == nil || p.session.StoreID == "" {
 		return nil
