@@ -178,6 +178,7 @@ func handleRequestOtp(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Phone    string `json:"phone"`
 		Password string `json:"password"`
+		Channel  int    `json:"channel"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "Invalid request body"})
@@ -195,6 +196,7 @@ func handleRequestOtp(w http.ResponseWriter, r *http.Request) {
 
 	challenge, err := authClient.RequestOtp(r.Context(), req.Phone, shopee.OtpRequestOptions{
 		Password:     req.Password,
+		Channel:      req.Channel,
 		DeviceReport: shopee.DeviceRiskBlob,
 	})
 	if err != nil {
