@@ -20,18 +20,18 @@ import (
 )
 
 var (
-	provider *shopee.Provider
-	svc      *payment.Service
-	session  shopee.Session
-	mu       sync.Mutex
+	defaultProvider *shopee.Provider
+	defaultSvc      *payment.Service
+	defaultSession  shopee.Session
+	mu              sync.Mutex
 )
 
-func getProvider() (*shopee.Provider, *payment.Service, error) {
+func getDefaultProvider() (*shopee.Provider, *payment.Service, error) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if svc != nil && provider != nil {
-		return provider, svc, nil
+	if defaultSvc != nil && defaultProvider != nil {
+		return defaultProvider, defaultSvc, nil
 	}
 
 	staticQris := os.Getenv("STATIC_QRIS")
@@ -50,15 +50,15 @@ func getProvider() (*shopee.Provider, *payment.Service, error) {
 		}
 	}
 
-	if err := json.Unmarshal(data, &session); err != nil {
+	if err := json.Unmarshal(data, &defaultSession); err != nil {
 		return nil, nil, fmt.Errorf("error decoding session JSON: %w", err)
 	}
 
 	logger := utils.NewConsoleLogger(utils.LevelInfo)
 	allocator := payment.NewExactAmountAllocator(true)
 
-	provider = shopee.NewProvider(shopee.ProviderConfig{
-		Session:      &session,
+	defaultProvider = shopee.NewProvider(shopee.ProviderConfig{
+		Session:      &defaultSession,
 		StaticQris:   staticQris,
 		Allocator:    allocator,
 		PollInterval: 5000,
@@ -67,15 +67,15 @@ func getProvider() (*shopee.Provider, *payment.Service, error) {
 	})
 
 	ctx := context.Background()
-	_, _ = provider.RefreshSession(ctx)
+	_, _ = defaultProvider.RefreshSession(ctx)
 
-	s, err := provider.Payments()
+	s, err := defaultProvider.Payments()
 	if err != nil {
 		return nil, nil, fmt.Errorf("provider.Payments error: %w", err)
 	}
-	svc = s
+	defaultSvc = s
 
-	return provider, svc, nil
+	return defaultProvider, defaultSvc, nil
 }
 
 // Handler is the Vercel Go Serverless entrypoint
@@ -83,7 +83,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	// CORS Headers for any SaaS domain
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, X-Shopee-Session, X-Static-Qris")
 
 	if r.Method == "OPTIONS" {
 		w.WriteHeader(http.StatusOK)
@@ -95,13 +95,43 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		path = strings.ToLower(matched)
 	}
 
-	// Create payment endpoint (POST)
+	// 1. Auth OTP Request
+	if strings.Contains(path, "otp/request") || strings.Contains(path, "auth/request-otp") {
+		handleRequestOtp(w, r)
+		return
+	}
+
+	// 2. Auth OTP Verify
+	if strings.Contains(path, "otp/verify") || strings.Contains(path, "auth/verify-otp") {
+		handleVerifyOtp(w, r)
+		return
+	}
+
+	// 3. Auth Complete Login
+	if strings.Contains(path, "auth/complete") || strings.Contains(path, "auth/complete-login") {
+		handleCompleteLogin(w, r)
+		return
+	}
+
+	// 4. Merchant Check / Info
+	if strings.Contains(path, "merchant/check") || strings.Contains(path, "merchant/info") {
+		handleMerchantCheck(w, r)
+		return
+	}
+
+	// 5. Payment Status Check via POST /status or /payment/status
+	if strings.Contains(path, "payment/status") || strings.Contains(path, "status") && r.Method == http.MethodPost {
+		handleGetPayment(w, r)
+		return
+	}
+
+	// 6. Create payment endpoint (POST)
 	if strings.Contains(path, "payment") && r.Method == http.MethodPost {
 		handleCreatePayment(w, r)
 		return
 	}
 
-	// Get payment status endpoint (GET)
+	// 7. Get payment status endpoint (GET)
 	if strings.Contains(path, "payment") && r.Method == http.MethodGet {
 		handleGetPayment(w, r)
 		return
@@ -112,7 +142,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleHealth(w http.ResponseWriter, _ *http.Request) {
-	p, _, err := getProvider()
+	p, _, err := getDefaultProvider()
 	if err != nil {
 		jsonResponse(w, http.StatusOK, map[string]any{
 			"status": "warning",
@@ -138,15 +168,233 @@ func handleHealth(w http.ResponseWriter, _ *http.Request) {
 		"merchant":  merchantName,
 		"store_id":  storeID,
 		"timestamp": time.Now().Unix(),
-		"runtime":   "Vercel Serverless (Go)",
+		"runtime":   "Vercel Serverless (Go Multi-Tenant)",
+	})
+}
+
+func handleRequestOtp(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonResponse(w, http.StatusMethodNotAllowed, map[string]any{"error": "Method not allowed"})
+		return
+	}
+
+	var req struct {
+		Phone    string `json:"phone"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "Invalid request body"})
+		return
+	}
+
+	if strings.TrimSpace(req.Phone) == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "Nomor telepon Shopee wajib diisi"})
+		return
+	}
+
+	logger := utils.NewConsoleLogger(utils.LevelInfo)
+	httpClient := shopee.NewHTTPClient(logger)
+	authClient := shopee.NewAuthClient(httpClient, shopee.APILocale{}, logger)
+
+	challenge, err := authClient.RequestOtp(r.Context(), req.Phone, shopee.OtpRequestOptions{
+		Password: req.Password,
+	})
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"success":   true,
+		"challenge": challenge,
+		"message":   fmt.Sprintf("Kode OTP telah dikirim ke %s", challenge.PhoneNumber),
+	})
+}
+
+func handleVerifyOtp(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonResponse(w, http.StatusMethodNotAllowed, map[string]any{"error": "Method not allowed"})
+		return
+	}
+
+	var req struct {
+		Challenge  shopee.OtpChallenge `json:"challenge"`
+		OTP        string              `json:"otp"`
+		MerchantID string              `json:"merchant_id"`
+		StoreID    string              `json:"store_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "Invalid request body: " + err.Error()})
+		return
+	}
+
+	if strings.TrimSpace(req.OTP) == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "Kode OTP wajib diisi"})
+		return
+	}
+
+	logger := utils.NewConsoleLogger(utils.LevelInfo)
+	provider := shopee.NewProvider(shopee.ProviderConfig{
+		Logger: logger,
+	})
+
+	outcome, err := provider.LoginWithOtp(r.Context(), shopee.LoginWithOtpInput{
+		Challenge:  req.Challenge,
+		OTP:        req.OTP,
+		MerchantID: req.MerchantID,
+		StoreID:    req.StoreID,
+	})
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+
+	if outcome.Status == shopee.LoginMerchantSelectionNeeded {
+		jsonResponse(w, http.StatusOK, map[string]any{
+			"success":      true,
+			"status":       "MERCHANT_SELECTION_NEEDED",
+			"merchants":    outcome.Merchants,
+			"verification": outcome.Verification,
+		})
+		return
+	}
+
+	session := outcome.Session
+	if session == nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": "Login berhasil tetapi sesi tidak terbentuk"})
+		return
+	}
+
+	// Try auto-selecting store if only 1 store
+	stores, _ := provider.ListStores(r.Context())
+	if len(stores) > 0 && session.StoreID == "" {
+		_, _ = provider.SelectStore(r.Context(), stores[0].ID)
+		session = provider.ExportSession()
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"success":  true,
+		"status":   "CONNECTED",
+		"session":  session,
+		"merchant": session.Merchant,
+		"store_id": session.StoreID,
+		"stores":   stores,
+	})
+}
+
+func handleCompleteLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonResponse(w, http.StatusMethodNotAllowed, map[string]any{"error": "Method not allowed"})
+		return
+	}
+
+	var req struct {
+		Verification shopee.OtpVerification `json:"verification"`
+		MerchantID   string                 `json:"merchant_id"`
+		StoreID      string                 `json:"store_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "Invalid request body"})
+		return
+	}
+
+	logger := utils.NewConsoleLogger(utils.LevelInfo)
+	provider := shopee.NewProvider(shopee.ProviderConfig{
+		Logger: logger,
+	})
+
+	session, err := provider.CompleteLogin(r.Context(), shopee.CompleteLoginInput{
+		Verification: req.Verification,
+		MerchantID:   req.MerchantID,
+		StoreID:      req.StoreID,
+	})
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+
+	stores, _ := provider.ListStores(r.Context())
+	if len(stores) > 0 && session.StoreID == "" {
+		_, _ = provider.SelectStore(r.Context(), stores[0].ID)
+		session = provider.ExportSession()
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"success":  true,
+		"status":   "CONNECTED",
+		"session":  session,
+		"merchant": session.Merchant,
+		"store_id": session.StoreID,
+		"stores":   stores,
+	})
+}
+
+func handleMerchantCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonResponse(w, http.StatusMethodNotAllowed, map[string]any{"error": "Method not allowed"})
+		return
+	}
+
+	var req struct {
+		SessionJSON string          `json:"session_json"`
+		Session     *shopee.Session `json:"session"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "Invalid request body"})
+		return
+	}
+
+	var sess shopee.Session
+	if req.Session != nil {
+		sess = *req.Session
+	} else if strings.TrimSpace(req.SessionJSON) != "" {
+		if err := json.Unmarshal([]byte(req.SessionJSON), &sess); err != nil {
+			jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "Format Session JSON tidak valid: " + err.Error()})
+			return
+		}
+	} else {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "Session JSON diperlukan"})
+		return
+	}
+
+	logger := utils.NewConsoleLogger(utils.LevelInfo)
+	provider := shopee.NewProvider(shopee.ProviderConfig{
+		Session: &sess,
+		Logger:  logger,
+	})
+
+	_, err := provider.RefreshSession(r.Context())
+	activeSession := provider.ExportSession()
+	if activeSession == nil {
+		jsonResponse(w, http.StatusOK, map[string]any{
+			"success": false,
+			"active":  false,
+			"error":   "Sesi Shopee kedaluwarsa atau tidak valid",
+		})
+		return
+	}
+
+	stores, _ := provider.ListStores(r.Context())
+
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"success":  true,
+		"active":   true,
+		"session":  activeSession,
+		"merchant": activeSession.Merchant,
+		"store_id": activeSession.StoreID,
+		"stores":   stores,
+		"err":      err,
 	})
 }
 
 func handleCreatePayment(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		OrderID          string `json:"order_id"`
-		Amount           int64  `json:"amount"`
-		ExpiresInMinutes int    `json:"expires_in_minutes"`
+		OrderID          string          `json:"order_id"`
+		Amount           int64           `json:"amount"`
+		ExpiresInMinutes int             `json:"expires_in_minutes"`
+		StaticQRIS       string          `json:"static_qris"`
+		SessionJSON      string          `json:"session_json"`
+		Session          *shopee.Session `json:"session"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -170,21 +418,22 @@ func handleCreatePayment(w http.ResponseWriter, r *http.Request) {
 	}
 	expiresAt := now.Add(time.Duration(expiryMinutes) * time.Minute)
 
-	p, service, err := getProvider()
-	if err != nil {
-		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
+	// Determine static QRIS
+	staticQris := strings.TrimSpace(req.StaticQRIS)
+	if staticQris == "" {
+		staticQris = r.Header.Get("X-Static-Qris")
 	}
-
-	staticQris := os.Getenv("STATIC_QRIS")
+	if staticQris == "" {
+		staticQris = os.Getenv("STATIC_QRIS")
+	}
 	if staticQris == "" {
 		staticQris = "00020101021126610016ID.CO.SHOPEE.WWW01189360091800237970570208237970570303UMI51440014ID.CO.QRIS.WWW0215ID10266049176290303UMI5204572253033605802ID5923Crave Solutions Service6007TANGSEL61051531262070703A016304351F"
 	}
 
 	dynamicQR, err := qris.StaticToDynamicQris(staticQris, req.Amount)
 	if err != nil {
-		// Fallback to service if helper error
-		if service != nil {
+		p, service, errDef := getDefaultProvider()
+		if errDef == nil && service != nil {
 			pay, errSvc := service.CreatePayment(r.Context(), payment.CreatePaymentInput{
 				Amount:    req.Amount,
 				Reference: req.OrderID,
@@ -194,6 +443,7 @@ func handleCreatePayment(w http.ResponseWriter, r *http.Request) {
 				dynamicQR = pay.QRString
 			}
 		}
+		_ = p
 	}
 
 	qrB64 := ""
@@ -204,11 +454,8 @@ func handleCreatePayment(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Stateless self-describing payment ID: pay_<amount>_<unix>_<nonce>
 	randSuffix := fmt.Sprintf("%x", time.Now().UnixNano()%1000000)
 	paymentID := fmt.Sprintf("pay_%d_%d_%s", req.Amount, now.Unix(), randSuffix)
-
-	_ = p // provider active
 
 	jsonResponse(w, http.StatusCreated, map[string]any{
 		"success":           true,
@@ -226,19 +473,47 @@ func handleCreatePayment(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleGetPayment(w http.ResponseWriter, r *http.Request) {
-	p, _, err := getProvider()
-	if err != nil {
-		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
+	// Parse target amount and creation time
+	var targetAmount int64
+	var id string
+	var userSession *shopee.Session
+
+	// Check if POST with JSON body
+	if r.Method == http.MethodPost {
+		var postReq struct {
+			PaymentID   string          `json:"payment_id"`
+			Amount      int64           `json:"amount"`
+			SessionJSON string          `json:"session_json"`
+			Session     *shopee.Session `json:"session"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&postReq); err == nil {
+			id = postReq.PaymentID
+			targetAmount = postReq.Amount
+			if postReq.Session != nil {
+				userSession = postReq.Session
+			} else if postReq.SessionJSON != "" {
+				var s shopee.Session
+				if err := json.Unmarshal([]byte(postReq.SessionJSON), &s); err == nil {
+					userSession = &s
+				}
+			}
+		}
 	}
 
-	// Extract ID from URL path or query parameter
-	id := strings.TrimPrefix(r.URL.Path, "/api/payments/")
-	id = strings.TrimPrefix(id, "/api/payments")
-	id = strings.TrimPrefix(id, "/payments/")
-	id = strings.TrimPrefix(id, "/")
+	// Fallback / standard extraction
 	if id == "" {
-		id = r.URL.Query().Get("id")
+		id = strings.TrimPrefix(r.URL.Path, "/api/payments/")
+		id = strings.TrimPrefix(id, "/api/payments")
+		id = strings.TrimPrefix(id, "/payments/")
+		id = strings.TrimPrefix(id, "/api/payment/status")
+		id = strings.TrimPrefix(id, "/payment/status")
+		id = strings.TrimPrefix(id, "/")
+		if id == "" {
+			id = r.URL.Query().Get("id")
+		}
+		if id == "" {
+			id = r.URL.Query().Get("payment_id")
+		}
 	}
 
 	if id == "" {
@@ -246,34 +521,60 @@ func handleGetPayment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse target amount and creation time from self-describing payment ID or query params
-	var targetAmount int64
-	createdAt := time.Now().Add(-10 * time.Minute)
-
-	if qAmount := r.URL.Query().Get("amount"); qAmount != "" {
-		if a, err := strconv.ParseInt(qAmount, 10, 64); err == nil {
-			targetAmount = a
+	if targetAmount == 0 {
+		if qAmount := r.URL.Query().Get("amount"); qAmount != "" {
+			if a, err := strconv.ParseInt(qAmount, 10, 64); err == nil {
+				targetAmount = a
+			}
 		}
 	}
 
+	// Check header for dynamic session
+	if userSession == nil {
+		if headerSession := r.Header.Get("X-Shopee-Session"); headerSession != "" {
+			var s shopee.Session
+			if err := json.Unmarshal([]byte(headerSession), &s); err == nil {
+				userSession = &s
+			}
+		}
+	}
+
+	createdAt := time.Now().Add(-10 * time.Minute)
 	parts := strings.Split(id, "_")
 	if len(parts) >= 3 && parts[0] == "pay" {
-		if a, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
-			targetAmount = a
+		if targetAmount == 0 {
+			if a, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
+				targetAmount = a
+			}
 		}
 		if u, err := strconv.ParseInt(parts[2], 10, 64); err == nil {
 			createdAt = time.Unix(u, 0)
 		}
 	}
 
-	// Query real-time Shopee transaction feed around the payment creation window
+	// Instantiate the provider (either user dynamic provider or default)
+	var activeProvider *shopee.Provider
+	if userSession != nil {
+		logger := utils.NewConsoleLogger(utils.LevelInfo)
+		activeProvider = shopee.NewProvider(shopee.ProviderConfig{
+			Session: userSession,
+			Logger:  logger,
+		})
+	} else {
+		p, _, err := getDefaultProvider()
+		if err != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		activeProvider = p
+	}
+
 	searchStart := createdAt.Add(-3 * time.Minute)
 	searchEnd := time.Now().Add(3 * time.Minute)
 
-	txs, err := p.GetRecentTransactions(r.Context(), searchStart, searchEnd)
+	txs, err := activeProvider.GetRecentTransactions(r.Context(), searchStart, searchEnd)
 	if err == nil {
 		for _, tx := range txs {
-			// Check if matching amount and transaction occurred around/after payment creation
 			amountMatches := (targetAmount == 0 || tx.Amount == targetAmount)
 			timeMatches := tx.Time.After(createdAt.Add(-60 * time.Second))
 
@@ -294,7 +595,6 @@ func handleGetPayment(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// If no completed transaction found yet, check expiry (10 min)
 	if time.Now().After(createdAt.Add(12 * time.Minute)) {
 		jsonResponse(w, http.StatusOK, map[string]any{
 			"success":       true,
@@ -305,7 +605,6 @@ func handleGetPayment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Still waiting for payment
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"success":       true,
 		"payment_id":    id,
