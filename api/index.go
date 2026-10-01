@@ -194,7 +194,8 @@ func handleRequestOtp(w http.ResponseWriter, r *http.Request) {
 	authClient := shopee.NewAuthClient(httpClient, shopee.APILocale{}, logger)
 
 	challenge, err := authClient.RequestOtp(r.Context(), req.Phone, shopee.OtpRequestOptions{
-		Password: req.Password,
+		Password:     req.Password,
+		DeviceReport: shopee.DeviceRiskBlob,
 	})
 	if err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -245,7 +246,8 @@ func handleVerifyOtp(w http.ResponseWriter, r *http.Request) {
 
 	logger := utils.NewConsoleLogger(utils.LevelInfo)
 	provider := shopee.NewProvider(shopee.ProviderConfig{
-		Logger: logger,
+		DeviceReport: shopee.DeviceRiskBlob,
+		Logger:       logger,
 	})
 
 	outcome, err := provider.LoginWithOtp(r.Context(), shopee.LoginWithOtpInput{
@@ -310,7 +312,8 @@ func handleCompleteLogin(w http.ResponseWriter, r *http.Request) {
 
 	logger := utils.NewConsoleLogger(utils.LevelInfo)
 	provider := shopee.NewProvider(shopee.ProviderConfig{
-		Logger: logger,
+		DeviceReport: shopee.DeviceRiskBlob,
+		Logger:       logger,
 	})
 
 	session, err := provider.CompleteLogin(r.Context(), shopee.CompleteLoginInput{
@@ -369,8 +372,9 @@ func handleMerchantCheck(w http.ResponseWriter, r *http.Request) {
 
 	logger := utils.NewConsoleLogger(utils.LevelInfo)
 	provider := shopee.NewProvider(shopee.ProviderConfig{
-		Session: &sess,
-		Logger:  logger,
+		Session:      &sess,
+		DeviceReport: shopee.DeviceRiskBlob,
+		Logger:       logger,
 	})
 
 	_, err := provider.RefreshSession(r.Context())
