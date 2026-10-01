@@ -35,9 +35,6 @@ func getDefaultProvider() (*shopee.Provider, *payment.Service, error) {
 	}
 
 	staticQris := os.Getenv("STATIC_QRIS")
-	if staticQris == "" {
-		staticQris = "00020101021126610016ID.CO.SHOPEE.WWW01189360091800237970570208237970570303UMI51440014ID.CO.QRIS.WWW0215ID10266049176290303UMI5204572253033605802ID5923Crave Solutions Service6007TANGSEL61051531262070703A016304351F"
-	}
 
 	var data []byte
 	var err error
@@ -152,8 +149,8 @@ func handleHealth(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	s := p.ExportSession()
-	merchantName := "Crave Solutions Service"
-	storeID := "23797057"
+	merchantName := "Multi-Tenant Payment Gateway"
+	storeID := "-"
 	if s != nil {
 		if s.Merchant.Name != "" {
 			merchantName = s.Merchant.Name
@@ -421,13 +418,16 @@ func handleCreatePayment(w http.ResponseWriter, r *http.Request) {
 	// Determine static QRIS
 	staticQris := strings.TrimSpace(req.StaticQRIS)
 	if staticQris == "" {
-		staticQris = r.Header.Get("X-Static-Qris")
+		staticQris = strings.TrimSpace(r.Header.Get("X-Static-Qris"))
 	}
 	if staticQris == "" {
-		staticQris = os.Getenv("STATIC_QRIS")
+		staticQris = strings.TrimSpace(os.Getenv("STATIC_QRIS"))
 	}
 	if staticQris == "" {
-		staticQris = "00020101021126610016ID.CO.SHOPEE.WWW01189360091800237970570208237970570303UMI51440014ID.CO.QRIS.WWW0215ID10266049176290303UMI5204572253033605802ID5923Crave Solutions Service6007TANGSEL61051531262070703A016304351F"
+		jsonResponse(w, http.StatusBadRequest, map[string]any{
+			"error": "QRIS Statis belum dikonfigurasi. Silakan atur String QRIS Statis toko Anda di menu Pengaturan > QRIS Merchant.",
+		})
+		return
 	}
 
 	dynamicQR, err := qris.StaticToDynamicQris(staticQris, req.Amount)
