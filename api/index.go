@@ -201,10 +201,23 @@ func handleRequestOtp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	channelName := "WhatsApp"
+	switch challenge.Channel {
+	case 1:
+		channelName = "SMS"
+	case 2:
+		channelName = "Panggilan Suara"
+	case 3:
+		channelName = "WhatsApp"
+	case 5:
+		channelName = "Notifikasi Aplikasi Shopee"
+	}
+
 	jsonResponse(w, http.StatusOK, map[string]any{
-		"success":   true,
-		"challenge": challenge,
-		"message":   fmt.Sprintf("Kode OTP telah dikirim ke %s", challenge.PhoneNumber),
+		"success":      true,
+		"challenge":    challenge,
+		"channel_name": channelName,
+		"message":      fmt.Sprintf("Kode OTP telah dikirim via %s ke %s", channelName, challenge.PhoneNumber),
 	})
 }
 

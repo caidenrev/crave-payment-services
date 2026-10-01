@@ -27,8 +27,6 @@ func NewAuthClient(http *HTTPClient, locale APILocale, logger utils.Logger) *Aut
 	return &AuthClient{http: http, locale: locale, logger: logger}
 }
 
-const passwordRequiredMessage = "This Shopee account is password-protected; supply the password to receive an OTP"
-
 // RequestOtp sends an OTP for a phone number and returns the challenge.
 func (a *AuthClient) RequestOtp(ctx context.Context, phoneNumber string, opts OtpRequestOptions) (*OtpChallenge, error) {
 	parsed, err := utils.ParseIndonesianMobile(phoneNumber)
@@ -88,8 +86,7 @@ func (a *AuthClient) RequestOtp(ctx context.Context, phoneNumber string, opts Ot
 		channel = intValue(settingsData["default_channel"], DefaultOTPChannel)
 	}
 	if len(availableChannels) > 0 && !containsInt(availableChannels, channel) {
-		return nil, core.NewConfigError("Requested Shopee OTP channel is unavailable",
-			map[string]any{"channel": channel, "availableChannels": availableChannels})
+		channel = availableChannels[0]
 	}
 
 	// Send OTP.
@@ -430,18 +427,21 @@ func (a *AuthClient) authenticateByPassword(ctx context.Context, phone, password
 
 	if response.Error == AuthErrorNeedOTP {
 		if password == "" {
-			return false, core.NewConfigError(passwordRequiredMessage, nil)
+			return false, core.NewConfigError("Akun Shopee ini dilindungi password. Silakan masukkan password akun Shopee Anda di kolom Password untuk meminta kode OTP.", nil)
 		}
 		return true, nil
 	}
 	if response.Error == 0 {
 		return false, nil
 	}
-	if hasPasswordInData(response.Data) {
-		return false, core.NewConfigError(passwordRequiredMessage, nil)
+	if hasPasswordInData(response.Data) || response.Error == 10002 || response.Error == 48401004 || response.Error == 48401002 {
+		if password == "" {
+			return false, core.NewConfigError("Akun Shopee ini dilindungi password. Silakan masukkan password akun Shopee Anda di kolom Password untuk meminta kode OTP.", nil)
+		}
+		return false, core.NewAuthError(core.CodeAuthFailed, "Password akun Shopee yang dimasukkan salah. Silakan periksa kembali password Anda.", nil)
 	}
 	return false, core.NewAuthError(core.CodeAuthFailed,
-		fmt.Sprintf("Shopee rejected the password before sending the OTP (error %d)", response.Error), nil)
+		fmt.Sprintf("Shopee menolak verifikasi: %s (kode error %d)", response.Msg, response.Error), nil)
 }
 
 func hasPasswordInData(data map[string]any) bool {
