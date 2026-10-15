@@ -24,3 +24,5 @@ session.json
 *.out
 .gocache/
 vendor/
+.vercel
+.env*

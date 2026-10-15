@@ -85,7 +85,7 @@ func Handle(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "NOT_CONFIGURED", "API v2 belum dikonfigurasi: "+err.Error())
 		return
 	}
-	s := &Server{Store: st, AdminToken: os.Getenv("ADMIN_TOKEN"), NewClient: newProviderClient, Now: time.Now}
+	s := &Server{Store: st, AdminToken: strings.TrimSpace(os.Getenv("ADMIN_TOKEN")), NewClient: newProviderClient, Now: time.Now}
 	s.ServeHTTP(w, r)
 }
 

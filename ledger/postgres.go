@@ -10,7 +10,8 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib" // driver "pgx"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 // Tables are prefixed with gateway_ so the gateway can share a database with
@@ -65,10 +66,14 @@ type PostgresStore struct {
 
 // OpenPostgres connects and creates the tables if needed.
 func OpenPostgres(ctx context.Context, dsn string, c *Cipher) (*PostgresStore, error) {
-	db, err := sql.Open("pgx", dsn)
+	cfg, err := pgx.ParseConfig(dsn)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("DATABASE_URL tidak valid: %w", err)
 	}
+	// DATABASE_URL dari integrasi Neon melewati pooler (PgBouncer, transaction
+	// mode): hindari prepared statement bernama yang terikat ke satu koneksi.
+	cfg.DefaultQueryExecMode = pgx.QueryExecModeExec
+	db := stdlib.OpenDB(*cfg)
 	// Serverless: each instance needs very few connections.
 	db.SetMaxOpenConns(4)
 	db.SetMaxIdleConns(2)
