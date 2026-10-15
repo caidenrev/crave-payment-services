@@ -245,6 +245,68 @@ User-Agent: QRISPaymentGateway/1.0
 
 ---
 
+## 🧾 API v2 — Multi-aplikasi dengan Ledger Klaim
+
+API v1 (`/api/payments`, `/api/payment/status`) bersifat stateless: status hanya mencocokkan **nominal**, sehingga mutasi lama bisa melunasi tagihan baru bernominal sama, dan dua aplikasi pada merchant yang sama bisa saling "mengambil" pembayaran.
+
+API v2 menyelesaikannya dengan database:
+
+- **Sesi Shopee disimpan di gateway** (terenkripsi AES-256-GCM). Login OTP cukup sekali; pembaruan cookie terjadi di satu tempat, jadi aplikasi tidak saling memutus sesi.
+- **Ledger klaim**: setiap `transaction_id` ShopeePay hanya bisa melunasi **satu** tagihan, di semua aplikasi.
+- **API key per aplikasi**. Panggil dari server, jangan dari browser.
+- Hanya transaksi berstatus selesai, bernominal sama, dan terjadi setelah tagihan dibuat yang bisa melunasi.
+
+### Environment variables
+
+| Variabel | Isi |
+|---|---|
+| `DATABASE_URL` | Koneksi Postgres (Neon / Supabase / Vercel Postgres). Tabel `gateway_*` dibuat otomatis. |
+| `SESSION_ENC_KEY` | Kunci 32 byte untuk enkripsi sesi: `openssl rand -base64 32`. **Jangan diganti** setelah ada merchant tersimpan. |
+| `ADMIN_TOKEN` | Token panjang acak untuk rute `/api/v2/admin/*`. Kosong = rute admin mati. |
+
+Jika `DATABASE_URL` di-set, endpoint v1 `/api/payment/status` **ikut memakai ledger** (satu mutasi = satu `payment_id`), jadi aplikasi lama langsung terlindungi tanpa perubahan kode.
+
+### Setup sekali (admin)
+
+```bash
+# 1. Minta OTP (channel 3 = WhatsApp, 1 = SMS)
+curl -X POST $GW/api/v2/admin/otp/request -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" -d '{"phone":"08xxxxxxxxxx","channel":3}'
+
+# 2. Verifikasi OTP (+ QRIS statis toko). Kirim balik objek "challenge" dari langkah 1.
+curl -X POST $GW/api/v2/admin/otp/verify -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" -d '{"challenge":{...},"otp":"123456","static_qris":"000201..."}'
+#    → status CONNECTED, merchant.id = "mch_<merchant>_<store>"
+#    → jika MERCHANT_SELECTION_NEEDED: POST /api/v2/admin/otp/complete {verification, merchant_id, store_id, static_qris}
+
+# 3. Buat API key untuk tiap aplikasi (ditampilkan SEKALI)
+curl -X POST $GW/api/v2/admin/apps -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" -d '{"name":"SaaS Baru","merchant_id":"mch_..."}'
+```
+
+Rute admin lain: `GET /api/v2/admin/merchants`, `GET /api/v2/admin/apps`, `POST /api/v2/admin/merchants/{id}/static-qris`.
+
+### Dipakai aplikasi
+
+```bash
+# Buat tagihan (idempoten per order_id)
+curl -X POST $GW/api/v2/invoices -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" -d '{"order_id":"INV-001","amount":25000,"expires_in_minutes":10}'
+# → { id, order_id, amount, status:"pending", qris_string, qris_image_base64, created_at, expires_at }
+
+# Cek status (polling tiap ±3 detik)
+curl $GW/api/v2/invoices/inv_xxx -H "Authorization: Bearer $API_KEY"
+# → status: pending | paid | expired ; saat paid: paid_at, transaction_id, payment_type
+# → "warning": "MERCHANT_DISCONNECTED" / "SHOPEE_UNAVAILABLE" bila feed Shopee tidak bisa dibaca (tagihan tetap pending)
+
+# Status koneksi merchant
+curl $GW/api/v2/merchant -H "Authorization: Bearer $API_KEY"
+```
+
+Error berbentuk `{ "success": false, "code": "...", "error": "..." }`. Kode penting: `UNAUTHORIZED`, `INVALID`, `ORDER_EXISTS` (order_id sama, nominal beda), `MERCHANT_DISCONNECTED` (admin perlu login OTP ulang), `QRIS_NOT_SET`, `NOT_CONFIGURED` (env v2 belum di-set).
+
+---
+
 ## 🛠️ Contoh Integrasi Backend
 
 ### Node.js / Express Webhook Handler

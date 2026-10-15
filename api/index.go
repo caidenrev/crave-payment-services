@@ -12,10 +12,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hirotomasato/paygateme/ledger"
 	"github.com/hirotomasato/paygateme/payment"
 	"github.com/hirotomasato/paygateme/qris"
 	"github.com/hirotomasato/paygateme/shopee"
 	"github.com/hirotomasato/paygateme/utils"
+	"github.com/hirotomasato/paygateme/v2api"
 	"rsc.io/qr"
 )
 
@@ -90,6 +92,12 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	path := strings.ToLower(r.URL.Path)
 	if matched := r.Header.Get("x-matched-path"); matched != "" {
 		path = strings.ToLower(matched)
+	}
+
+	// 0. API v2: sesi Shopee disimpan di gateway, API key per aplikasi, ledger klaim
+	if strings.HasPrefix(path, "/api/v2") {
+		v2api.Handle(w, r)
+		return
 	}
 
 	// 1. Auth OTP Request
@@ -592,12 +600,48 @@ func handleGetPayment(w http.ResponseWriter, r *http.Request) {
 	searchEnd := time.Now().Add(3 * time.Minute)
 
 	txs, err := activeProvider.GetRecentTransactions(r.Context(), searchStart, searchEnd)
+	if err == nil && targetAmount > 0 {
+		// Dengan ledger (DATABASE_URL di-set): satu mutasi hanya bisa melunasi satu
+		// payment_id, termasuk lintas aplikasi dan dengan tagihan /api/v2.
+		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
+		st, lerr := ledger.FromEnv(ctx)
+		if lerr == nil {
+			tx, cerr := ledger.ClaimFirst(ctx, st, "legacy:"+id, ledger.Window{
+				Amount:    targetAmount,
+				NotBefore: createdAt.Add(-60 * time.Second),
+				NotAfter:  searchEnd,
+			}, txs)
+			cancel()
+			if cerr == nil {
+				if tx != nil {
+					jsonResponse(w, http.StatusOK, map[string]any{
+						"success":        true,
+						"payment_id":     id,
+						"order_id":       tx.OrderID,
+						"amount":         tx.Amount,
+						"unique_amount":  tx.Amount,
+						"status":         "PAID",
+						"paid_at":        tx.Time,
+						"transaction_id": tx.ID,
+						"payment_type":   tx.PaymentType,
+					})
+					return
+				}
+				txs = nil // semua mutasi yang cocok sudah dipakai tagihan lain → tetap PENDING
+			}
+			// ledger gagal diakses → jatuh ke pencocokan lama di bawah
+		} else {
+			cancel()
+		}
+	}
 	if err == nil {
 		for _, tx := range txs {
 			amountMatches := (targetAmount == 0 || tx.Amount == targetAmount)
 			timeMatches := tx.Time.After(createdAt.Add(-60 * time.Second))
+			// transaksi gagal/masih diproses di Shopee tidak boleh dianggap lunas
+			statusOK := payment.IsSettledStatus(tx.Status)
 
-			if amountMatches && timeMatches {
+			if amountMatches && timeMatches && statusOK {
 				jsonResponse(w, http.StatusOK, map[string]any{
 					"success":        true,
 					"payment_id":     id,

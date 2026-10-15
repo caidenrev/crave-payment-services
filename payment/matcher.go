@@ -20,6 +20,14 @@ var settledStatuses = map[string]bool{
 	"completed":  true,
 }
 
+// IsSettledStatus reports whether a feed status label counts as a successful
+// payment. Empty/unknown labels are accepted (fail-open); known failure labels
+// such as Shopee's "shopee:<code>" for non-completed rows are rejected.
+func IsSettledStatus(status string) bool {
+	s := strings.ToLower(strings.TrimSpace(status))
+	return s == "" || settledStatuses[s]
+}
+
 // MatchesPayment reports whether a transaction settles a given pending payment.
 //
 // Matching rules:
