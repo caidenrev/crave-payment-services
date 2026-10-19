@@ -17,6 +17,14 @@ type MemoryStore struct {
 	apps      map[string]App
 	keys      map[string]string // keyHash -> app id
 	invoices  map[string]Invoice
+	tokens    map[string]memToken // tokenHash -> token
+	checked   map[string]time.Time
+	themes    map[string][]byte
+}
+
+type memToken struct {
+	invoiceID string
+	expiresAt time.Time
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -27,6 +35,9 @@ func NewMemoryStore() *MemoryStore {
 		apps:      map[string]App{},
 		keys:      map[string]string{},
 		invoices:  map[string]Invoice{},
+		tokens:    map[string]memToken{},
+		checked:   map[string]time.Time{},
+		themes:    map[string][]byte{},
 	}
 }
 
@@ -109,6 +120,28 @@ func (s *MemoryStore) AppByKeyHash(_ context.Context, keyHash string) (App, erro
 	return s.apps[id], nil
 }
 
+func (s *MemoryStore) AppByID(_ context.Context, id string) (App, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, ok := s.apps[id]
+	if !ok {
+		return App{}, ErrNotFound
+	}
+	return a, nil
+}
+
+func (s *MemoryStore) SetClientKey(_ context.Context, appID, clientKey string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, ok := s.apps[appID]
+	if !ok {
+		return ErrNotFound
+	}
+	a.ClientKey = clientKey
+	s.apps[appID] = a
+	return nil
+}
+
 func (s *MemoryStore) ListApps(_ context.Context) ([]App, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -167,4 +200,52 @@ func (s *MemoryStore) MarkExpired(_ context.Context, id string) (bool, error) {
 	inv.Status = StatusExpired
 	s.invoices[id] = inv
 	return true, nil
+}
+
+func (s *MemoryStore) CreateCheckoutToken(_ context.Context, tokenHash, invoiceID string, expiresAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tokens[tokenHash] = memToken{invoiceID: invoiceID, expiresAt: expiresAt}
+	return nil
+}
+
+func (s *MemoryStore) InvoiceByToken(_ context.Context, tokenHash string, now time.Time) (Invoice, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, ok := s.tokens[tokenHash]
+	if !ok || !now.Before(t.expiresAt) {
+		return Invoice{}, ErrNotFound
+	}
+	inv, ok := s.invoices[t.invoiceID]
+	if !ok {
+		return Invoice{}, ErrNotFound
+	}
+	return inv, nil
+}
+
+func (s *MemoryStore) TryMarkChecked(_ context.Context, invoiceID string, now time.Time, minGap time.Duration) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if last, ok := s.checked[invoiceID]; ok && last.After(now.Add(-minGap)) {
+		return false, nil
+	}
+	s.checked[invoiceID] = now
+	return true, nil
+}
+
+func (s *MemoryStore) GetCheckoutTheme(_ context.Context, merchantID string) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, ok := s.themes[merchantID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return append([]byte(nil), t...), nil
+}
+
+func (s *MemoryStore) SaveCheckoutTheme(_ context.Context, merchantID string, theme []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.themes[merchantID] = append([]byte(nil), theme...)
+	return nil
 }
