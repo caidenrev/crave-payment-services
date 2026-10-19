@@ -108,13 +108,24 @@ func TestCheckoutRedirectURL(t *testing.T) {
 		t.Fatalf("redirect_url pair must open checkout: %d", code)
 	}
 
-	// aplikasi lama tanpa client key: token tetap ada, redirect_url ditahan + peringatan
+	// aplikasi lama tanpa client key: otomatis dibuatkan saat membuat tagihan
 	if err := e.st.SetClientKey(context.Background(), app.id, ""); err != nil {
 		t.Fatal(err)
 	}
 	old := e.invoice(app.secret, "o2", 10000)
-	if _, ok := old["redirect_url"]; ok || old["warning"] != "CLIENT_KEY_MISSING" || old["token"] == nil {
-		t.Fatalf("app without client key: %v", old)
+	stored, _ := e.st.AppByID(context.Background(), app.id)
+	if !strings.HasPrefix(stored.ClientKey, clientKeyPrefix) {
+		t.Fatalf("legacy app must get a client key: %+v", stored)
+	}
+	if old["redirect_url"] != "https://pay.example.id/i/"+old["token"].(string)+"?ck="+stored.ClientKey || old["warning"] != nil {
+		t.Fatalf("legacy app redirect_url: %v", old)
+	}
+	if code, _ := e.checkout(old["token"].(string), stored.ClientKey); code != http.StatusOK {
+		t.Fatalf("auto client key must open checkout: %d", code)
+	}
+	// secret key lama tetap berlaku
+	if got := e.status(app.secret, old["id"].(string)); got["status"] != "pending" {
+		t.Fatalf("secret key must keep working: %v", got)
 	}
 }
 

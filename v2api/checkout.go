@@ -79,10 +79,16 @@ func (s *Server) addCheckout(ctx context.Context, view map[string]any, inv ledge
 		return
 	}
 	view["token"] = token
+	if app.ClientKey == "" {
+		// Aplikasi yang dibuat sebelum client key ada: buatkan sekarang, supaya
+		// popup langsung bisa dipakai tanpa langkah admin. Secret key tidak berubah.
+		if key, err := newClientKey(); err == nil && s.Store.SetClientKey(ctx, app.ID, key) == nil {
+			app.ClientKey = key
+		}
+	}
 	switch {
 	case s.CheckoutBaseURL == "":
 	case app.ClientKey == "":
-		// aplikasi lama: buat client key dulu lewat POST /admin/apps/{id}/client-key
 		view["warning"] = "CLIENT_KEY_MISSING"
 	default:
 		view["redirect_url"] = s.CheckoutBaseURL + "/i/" + token + "?ck=" + url.QueryEscape(app.ClientKey)
