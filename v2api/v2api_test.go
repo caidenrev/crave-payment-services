@@ -25,6 +25,7 @@ type fakeShopee struct {
 	recentErr   error // dikembalikan sekali oleh Recent
 	refreshErr  error
 	refreshes   int
+	recentCalls int
 	renewCookie string
 }
 
@@ -36,6 +37,7 @@ type fakeClient struct {
 func (c *fakeClient) Recent(_ context.Context, _, _ time.Time) ([]core.MerchantTransaction, error) {
 	c.f.mu.Lock()
 	defer c.f.mu.Unlock()
+	c.f.recentCalls++
 	if c.f.recentErr != nil {
 		err := c.f.recentErr
 		c.f.recentErr = nil

@@ -10,13 +10,20 @@
 //	GET  /api/v2/admin/merchants
 //	POST /api/v2/admin/merchants/{id}/static-qris {static_qris}
 //	GET  /api/v2/admin/apps
-//	POST /api/v2/admin/apps                     {name, merchant_id}  → api_key (shown once)
+//	POST /api/v2/admin/apps                     {name, merchant_id}  → api_key (shown once) + client_key
+//	POST /api/v2/admin/apps/{id}/client-key     → new client_key
+//	GET  /api/v2/admin/merchants/{id}/checkout-theme
+//	PUT  /api/v2/admin/merchants/{id}/checkout-theme
 //
 // App routes (Authorization: Bearer <api_key>, call from a server, never a browser):
 //
 //	GET  /api/v2/merchant
-//	POST /api/v2/invoices                       {order_id, amount, expires_in_minutes}
+//	POST /api/v2/invoices                       {order_id, amount, expires_in_minutes} → … + token, redirect_url
 //	GET  /api/v2/invoices/{id}
+//
+// Public checkout route (browser, X-Client-Key: <client_key>), see checkout.go:
+//
+//	GET  /api/v2/checkout/{token}
 package v2api
 
 import (
@@ -55,6 +62,9 @@ type Server struct {
 	AdminToken string
 	NewClient  func(sess *shopee.Session) ShopeeClient
 	Now        func() time.Time
+	// CheckoutBaseURL membentuk redirect_url (mis. https://pay.craveservices.my.id);
+	// kosong = redirect_url tidak dikirim.
+	CheckoutBaseURL string
 }
 
 type providerClient struct{ p *shopee.Provider }
@@ -85,7 +95,10 @@ func Handle(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "NOT_CONFIGURED", "API v2 belum dikonfigurasi: "+err.Error())
 		return
 	}
-	s := &Server{Store: st, AdminToken: strings.TrimSpace(os.Getenv("ADMIN_TOKEN")), NewClient: newProviderClient, Now: time.Now}
+	s := &Server{
+		Store: st, AdminToken: strings.TrimSpace(os.Getenv("ADMIN_TOKEN")), NewClient: newProviderClient, Now: time.Now,
+		CheckoutBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("CHECKOUT_BASE_URL")), "/"),
+	}
 	s.ServeHTTP(w, r)
 }
 
@@ -103,6 +116,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.routeAdmin(w, r, parts[1:])
+
+	case parts[0] == "checkout":
+		if len(parts) != 2 || parts[1] == "" || r.Method != http.MethodGet {
+			writeErr(w, http.StatusNotFound, "NOT_FOUND", "Endpoint tidak ditemukan")
+			return
+		}
+		s.publicCheckout(w, r, parts[1])
 
 	default:
 		app, ok := s.authApp(w, r)
@@ -179,6 +199,12 @@ func (s *Server) routeAdmin(w http.ResponseWriter, r *http.Request, parts []stri
 		s.listApps(w, r)
 	case len(parts) == 1 && parts[0] == "apps" && r.Method == http.MethodPost:
 		s.createApp(w, r)
+	case len(parts) == 3 && parts[0] == "apps" && parts[2] == "client-key" && r.Method == http.MethodPost:
+		s.rollClientKey(w, r, parts[1])
+	case len(parts) == 3 && parts[0] == "merchants" && parts[2] == "checkout-theme" && r.Method == http.MethodGet:
+		s.getCheckoutTheme(w, r, parts[1])
+	case len(parts) == 3 && parts[0] == "merchants" && parts[2] == "checkout-theme" && r.Method == http.MethodPut:
+		s.putCheckoutTheme(w, r, parts[1])
 	default:
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", "Endpoint admin tidak ditemukan")
 	}
@@ -360,7 +386,7 @@ func (s *Server) listApps(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]map[string]any, 0, len(apps))
 	for _, a := range apps {
-		out = append(out, map[string]any{"id": a.ID, "name": a.Name, "merchant_id": a.MerchantID, "created_at": a.CreatedAt})
+		out = append(out, map[string]any{"id": a.ID, "name": a.Name, "merchant_id": a.MerchantID, "client_key": a.ClientKey, "created_at": a.CreatedAt})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"apps": out})
 }
@@ -387,7 +413,12 @@ func (s *Server) createApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := "pgk_" + base64.RawURLEncoding.EncodeToString(buf)
-	app := ledger.App{ID: "app_" + strings.TrimPrefix(utils.PaymentID(), "pay_"), Name: strings.TrimSpace(req.Name), MerchantID: req.MerchantID}
+	clientKey, err := newClientKey()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "RANDOM", "Gagal membuat client key")
+		return
+	}
+	app := ledger.App{ID: "app_" + strings.TrimPrefix(utils.PaymentID(), "pay_"), Name: strings.TrimSpace(req.Name), MerchantID: req.MerchantID, ClientKey: clientKey}
 	if err := s.Store.CreateApp(r.Context(), app, hashKey(key)); err != nil {
 		writeErr(w, http.StatusInternalServerError, "STORE_ERROR", "Gagal menyimpan aplikasi")
 		return
@@ -396,6 +427,8 @@ func (s *Server) createApp(w http.ResponseWriter, r *http.Request) {
 		"app": map[string]any{"id": app.ID, "name": app.Name, "merchant_id": app.MerchantID},
 		// hanya ditampilkan sekali; gateway menyimpan hash-nya saja
 		"api_key": key,
+		// publik, boleh di browser; selalu bisa dilihat lagi lewat GET /admin/apps
+		"client_key": clientKey,
 	})
 }
 
@@ -484,6 +517,7 @@ func (s *Server) createInvoice(w http.ResponseWriter, r *http.Request, app ledge
 	if code, err := qr.Encode(inv.QRString, qr.M); err == nil {
 		view["qris_image_base64"] = "data:image/png;base64," + base64.StdEncoding.EncodeToString(code.PNG())
 	}
+	s.addCheckout(r.Context(), view, inv, app)
 	status := http.StatusCreated
 	if !created {
 		status = http.StatusOK

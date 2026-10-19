@@ -47,10 +47,13 @@ type Merchant struct {
 }
 
 // App is a client application (a SaaS) allowed to bill through one merchant.
+// Its secret API key is stored only as a hash; ClientKey is public (safe in a
+// browser) and only opens checkout pages for tokens the app itself issued.
 type App struct {
 	ID         string
 	Name       string
 	MerchantID string
+	ClientKey  string
 	CreatedAt  time.Time
 }
 
@@ -88,7 +91,10 @@ type Store interface {
 
 	CreateApp(ctx context.Context, app App, keyHash string) error
 	AppByKeyHash(ctx context.Context, keyHash string) (App, error)
+	AppByID(ctx context.Context, id string) (App, error)
 	ListApps(ctx context.Context) ([]App, error)
+	// SetClientKey creates or replaces an app's public client key.
+	SetClientKey(ctx context.Context, appID, clientKey string) error
 
 	// CreateInvoice is idempotent per (AppID, OrderID): an existing invoice is
 	// returned with created=false.
@@ -97,6 +103,20 @@ type Store interface {
 	// MarkPaid moves a pending invoice to paid; false if it was not pending.
 	MarkPaid(ctx context.Context, id, txID, paymentType string, paidAt time.Time) (bool, error)
 	MarkExpired(ctx context.Context, id string) (bool, error)
+
+	// CreateCheckoutToken stores the hash of a token that opens one invoice's
+	// checkout page until expiresAt. An invoice may have several tokens.
+	CreateCheckoutToken(ctx context.Context, tokenHash, invoiceID string, expiresAt time.Time) error
+	// InvoiceByToken returns the invoice a token opens, or ErrNotFound when the
+	// token is unknown or expired at now.
+	InvoiceByToken(ctx context.Context, tokenHash string, now time.Time) (Invoice, error)
+	// TryMarkChecked records a feed check for an invoice. It returns false when
+	// another check ran within minGap, so public polling cannot hammer Shopee.
+	TryMarkChecked(ctx context.Context, invoiceID string, now time.Time, minGap time.Duration) (bool, error)
+
+	// GetCheckoutTheme returns a merchant's checkout theme JSON, or ErrNotFound.
+	GetCheckoutTheme(ctx context.Context, merchantID string) ([]byte, error)
+	SaveCheckoutTheme(ctx context.Context, merchantID string, theme []byte) error
 }
 
 // Window bounds which transactions may settle a bill.

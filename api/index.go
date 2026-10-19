@@ -82,7 +82,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	// CORS Headers for any SaaS domain
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, X-Shopee-Session, X-Static-Qris")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, X-Shopee-Session, X-Static-Qris, X-Client-Key")
 
 	if r.Method == "OPTIONS" {
 		w.WriteHeader(http.StatusOK)

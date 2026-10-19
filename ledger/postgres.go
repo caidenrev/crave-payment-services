@@ -56,6 +56,20 @@ create table if not exists gateway_claims (
   ref text not null,
   claimed_at timestamptz not null default now()
 );
+alter table gateway_apps add column if not exists client_key text unique;
+alter table gateway_invoices add column if not exists last_checked_at timestamptz;
+create table if not exists gateway_checkout_tokens (
+  token_hash text primary key,
+  invoice_id text not null references gateway_invoices(id),
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists gateway_checkout_tokens_invoice on gateway_checkout_tokens (invoice_id);
+create table if not exists gateway_checkout_themes (
+  merchant_id text primary key references gateway_merchants(id),
+  theme jsonb not null,
+  updated_at timestamptz not null default now()
+);
 `
 
 // PostgresStore persists state in Postgres; sessions are encrypted with Cipher.
@@ -229,36 +243,56 @@ func (s *PostgresStore) WithMerchantLock(ctx context.Context, id string, fn func
 }
 
 func (s *PostgresStore) CreateApp(ctx context.Context, app App, keyHash string) error {
-	_, err := s.db.ExecContext(ctx, `insert into gateway_apps (id, name, merchant_id, key_hash) values ($1,$2,$3,$4)`,
-		app.ID, app.Name, app.MerchantID, keyHash)
+	_, err := s.db.ExecContext(ctx, `insert into gateway_apps (id, name, merchant_id, key_hash, client_key) values ($1,$2,$3,$4, nullif($5,''))`,
+		app.ID, app.Name, app.MerchantID, keyHash, app.ClientKey)
 	return err
 }
 
-func (s *PostgresStore) AppByKeyHash(ctx context.Context, keyHash string) (App, error) {
+const appCols = `id, name, merchant_id, coalesce(client_key,''), created_at`
+
+func scanApp(row rowScanner) (App, error) {
 	var a App
-	err := s.db.QueryRowContext(ctx, `select id, name, merchant_id, created_at from gateway_apps where key_hash = $1`, keyHash).
-		Scan(&a.ID, &a.Name, &a.MerchantID, &a.CreatedAt)
+	err := row.Scan(&a.ID, &a.Name, &a.MerchantID, &a.ClientKey, &a.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return a, ErrNotFound
 	}
 	return a, err
 }
 
+func (s *PostgresStore) AppByKeyHash(ctx context.Context, keyHash string) (App, error) {
+	return scanApp(s.db.QueryRowContext(ctx, `select `+appCols+` from gateway_apps where key_hash = $1`, keyHash))
+}
+
+func (s *PostgresStore) AppByID(ctx context.Context, id string) (App, error) {
+	return scanApp(s.db.QueryRowContext(ctx, `select `+appCols+` from gateway_apps where id = $1`, id))
+}
+
 func (s *PostgresStore) ListApps(ctx context.Context) ([]App, error) {
-	rows, err := s.db.QueryContext(ctx, `select id, name, merchant_id, created_at from gateway_apps order by created_at`)
+	rows, err := s.db.QueryContext(ctx, `select `+appCols+` from gateway_apps order by created_at`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []App
 	for rows.Next() {
-		var a App
-		if err := rows.Scan(&a.ID, &a.Name, &a.MerchantID, &a.CreatedAt); err != nil {
+		a, err := scanApp(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, a)
 	}
 	return out, rows.Err()
+}
+
+func (s *PostgresStore) SetClientKey(ctx context.Context, appID, clientKey string) error {
+	res, err := s.db.ExecContext(ctx, `update gateway_apps set client_key = $2 where id = $1`, appID, clientKey)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 const invoiceCols = `id, app_id, merchant_id, order_id, amount, status, qris_string, created_at, expires_at, paid_at, coalesce(transaction_id,''), coalesce(payment_type,'')`
@@ -316,4 +350,41 @@ func (s *PostgresStore) MarkExpired(ctx context.Context, id string) (bool, error
 	}
 	n, _ := res.RowsAffected()
 	return n == 1, nil
+}
+
+func (s *PostgresStore) CreateCheckoutToken(ctx context.Context, tokenHash, invoiceID string, expiresAt time.Time) error {
+	_, err := s.db.ExecContext(ctx, `insert into gateway_checkout_tokens (token_hash, invoice_id, expires_at) values ($1,$2,$3)`,
+		tokenHash, invoiceID, expiresAt)
+	return err
+}
+
+func (s *PostgresStore) InvoiceByToken(ctx context.Context, tokenHash string, now time.Time) (Invoice, error) {
+	return scanInvoice(s.db.QueryRowContext(ctx, `select `+invoiceCols+` from gateway_invoices
+		where id = (select invoice_id from gateway_checkout_tokens where token_hash = $1 and expires_at > $2)`, tokenHash, now))
+}
+
+func (s *PostgresStore) TryMarkChecked(ctx context.Context, invoiceID string, now time.Time, minGap time.Duration) (bool, error) {
+	// Satu statement: hanya satu pemanggil per jeda yang lolos, lintas instance serverless.
+	res, err := s.db.ExecContext(ctx, `update gateway_invoices set last_checked_at = $2
+		where id = $1 and (last_checked_at is null or last_checked_at <= $3)`, invoiceID, now, now.Add(-minGap))
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
+}
+
+func (s *PostgresStore) GetCheckoutTheme(ctx context.Context, merchantID string) ([]byte, error) {
+	var theme string
+	err := s.db.QueryRowContext(ctx, `select theme::text from gateway_checkout_themes where merchant_id = $1`, merchantID).Scan(&theme)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return []byte(theme), err
+}
+
+func (s *PostgresStore) SaveCheckoutTheme(ctx context.Context, merchantID string, theme []byte) error {
+	_, err := s.db.ExecContext(ctx, `insert into gateway_checkout_themes (merchant_id, theme, updated_at) values ($1, $2::jsonb, now())
+		on conflict (merchant_id) do update set theme = excluded.theme, updated_at = now()`, merchantID, string(theme))
+	return err
 }
