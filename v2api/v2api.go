@@ -517,7 +517,7 @@ func (s *Server) createInvoice(w http.ResponseWriter, r *http.Request, app ledge
 	if code, err := qr.Encode(inv.QRString, qr.M); err == nil {
 		view["qris_image_base64"] = "data:image/png;base64," + base64.StdEncoding.EncodeToString(code.PNG())
 	}
-	s.addCheckout(r.Context(), view, inv)
+	s.addCheckout(r.Context(), view, inv, app)
 	status := http.StatusCreated
 	if !created {
 		status = http.StatusOK

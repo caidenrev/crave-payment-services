@@ -2,6 +2,7 @@ package v2api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -98,8 +99,22 @@ func TestCheckoutRedirectURL(t *testing.T) {
 	e.srv.CheckoutBaseURL = "https://pay.example.id"
 	app := e.newAppKeys("POS")
 	inv := e.invoice(app.secret, "o", 10000)
-	if inv["redirect_url"] != "https://pay.example.id/i/"+inv["token"].(string) {
-		t.Fatalf("redirect_url: %v", inv)
+	want := "https://pay.example.id/i/" + inv["token"].(string) + "?ck=" + app.client
+	if inv["redirect_url"] != want {
+		t.Fatalf("redirect_url: got %v want %s", inv["redirect_url"], want)
+	}
+	// halaman bayar membuka tagihan dengan token + ck dari redirect_url
+	if code, _ := e.checkout(inv["token"].(string), app.client); code != http.StatusOK {
+		t.Fatalf("redirect_url pair must open checkout: %d", code)
+	}
+
+	// aplikasi lama tanpa client key: token tetap ada, redirect_url ditahan + peringatan
+	if err := e.st.SetClientKey(context.Background(), app.id, ""); err != nil {
+		t.Fatal(err)
+	}
+	old := e.invoice(app.secret, "o2", 10000)
+	if _, ok := old["redirect_url"]; ok || old["warning"] != "CLIENT_KEY_MISSING" || old["token"] == nil {
+		t.Fatalf("app without client key: %v", old)
 	}
 }
 

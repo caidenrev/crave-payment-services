@@ -69,15 +69,23 @@ func (s *Server) issueCheckoutToken(ctx context.Context, inv ledger.Invoice) (st
 // addCheckout menambahkan token dan redirect_url ke respons buat tagihan.
 // Kalau token gagal dibuat, tagihan tetap dikembalikan (integrasi lama tidak
 // butuh token) dengan peringatan.
-func (s *Server) addCheckout(ctx context.Context, view map[string]any, inv ledger.Invoice) {
+//
+// redirect_url membawa client key aplikasi (?ck=) karena halaman bayar dibuka
+// pelanggan tanpa kode integrasi apa pun; client key memang publik.
+func (s *Server) addCheckout(ctx context.Context, view map[string]any, inv ledger.Invoice, app ledger.App) {
 	token, err := s.issueCheckoutToken(ctx, inv)
 	if err != nil {
 		view["warning"] = "CHECKOUT_TOKEN_UNAVAILABLE"
 		return
 	}
 	view["token"] = token
-	if s.CheckoutBaseURL != "" {
-		view["redirect_url"] = s.CheckoutBaseURL + "/i/" + token
+	switch {
+	case s.CheckoutBaseURL == "":
+	case app.ClientKey == "":
+		// aplikasi lama: buat client key dulu lewat POST /admin/apps/{id}/client-key
+		view["warning"] = "CLIENT_KEY_MISSING"
+	default:
+		view["redirect_url"] = s.CheckoutBaseURL + "/i/" + token + "?ck=" + url.QueryEscape(app.ClientKey)
 	}
 }
 
