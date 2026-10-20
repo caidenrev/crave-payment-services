@@ -652,6 +652,16 @@ func (s *PostgresStore) SetMerchantOrg(ctx context.Context, merchantID, orgID st
 	return n == 1, nil
 }
 
+func (s *PostgresStore) ReleaseMerchant(ctx context.Context, merchantID, orgID string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `update gateway_merchants set org_id = null, session_enc = null, status = $3, updated_at = now()
+		where id = $1 and org_id = $2`, merchantID, orgID, MerchantDisconnected)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
+}
+
 // execOne runs an update on a live (not deleted) app; ErrNotFound when none matched.
 func (s *PostgresStore) execOne(ctx context.Context, q string, args ...any) error {
 	res, err := s.db.ExecContext(ctx, q, args...)

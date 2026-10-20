@@ -301,6 +301,66 @@ func (s *Server) consoleSetStaticQris(w http.ResponseWriter, r *http.Request, or
 	s.setStaticQris(w, r, merchantID)
 }
 
+// consoleDisconnectMerchant logout merchant dari Shopee: sesi dihapus, status
+// terputus. Merchant & aplikasinya tetap; tagihan baru ditolak sampai login ulang via OTP.
+func (s *Server) consoleDisconnectMerchant(w http.ResponseWriter, r *http.Request, org ledger.Membership, merchantID string) {
+	if !canManageMerchants(org.Role) {
+		forbidden(w)
+		return
+	}
+	if _, ok := s.orgMerchant(w, r, org, merchantID); !ok {
+		return
+	}
+	err := s.Store.WithMerchantLock(r.Context(), merchantID, func(m *ledger.Merchant) error {
+		m.SessionJSON = nil
+		m.Status = ledger.MerchantDisconnected
+		return nil
+	})
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "STORE_ERROR", "Gagal memutuskan merchant")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "status": ledger.MerchantDisconnected})
+}
+
+// consoleReleaseMerchant menghapus merchant dari org. Ditolak bila masih ada
+// aplikasi yang memakainya, supaya integrasi yang berjalan tidak putus diam-diam.
+func (s *Server) consoleReleaseMerchant(w http.ResponseWriter, r *http.Request, org ledger.Membership, merchantID string) {
+	if !canManageMerchants(org.Role) {
+		forbidden(w)
+		return
+	}
+	if _, ok := s.orgMerchant(w, r, org, merchantID); !ok {
+		return
+	}
+	apps, err := s.Store.ListApps(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "STORE_ERROR", "Gagal membaca aplikasi")
+		return
+	}
+	using := 0
+	for _, a := range apps {
+		if a.MerchantID == merchantID {
+			using++
+		}
+	}
+	if using > 0 {
+		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "code": "MERCHANT_HAS_APPS", "apps": using,
+			"error": "Hapus dulu aplikasi yang memakai merchant ini"})
+		return
+	}
+	ok, err := s.Store.ReleaseMerchant(r.Context(), merchantID, org.OrgID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "STORE_ERROR", "Gagal menghapus merchant")
+		return
+	}
+	if !ok {
+		writeErr(w, http.StatusNotFound, "NOT_FOUND", "Merchant tidak ditemukan")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true})
+}
+
 func (s *Server) consoleCreateApp(w http.ResponseWriter, r *http.Request, org ledger.Membership) {
 	if !canManageApps(org.Role) {
 		forbidden(w)

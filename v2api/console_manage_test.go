@@ -350,3 +350,55 @@ func TestConsoleAppLifecycle(t *testing.T) {
 		t.Fatalf("invoices of deleted app stay: %v", inv)
 	}
 }
+
+func TestConsoleDisconnectAndReleaseMerchant(t *testing.T) {
+	e := newEnv(t)
+	e.manageEnv()
+	ctx := context.Background()
+
+	// org lain tidak bisa memutuskan / menghapus merchant founder
+	if code, _, _ := e.consoleCall("POST", "tok-other", "merchants/mch_777_88/disconnect", nil); code != http.StatusNotFound {
+		t.Fatalf("foreign disconnect: %d", code)
+	}
+	if code, _, _ := e.consoleCall("DELETE", "tok-other", "merchants/mch_777_88", nil); code != http.StatusNotFound {
+		t.Fatalf("foreign release: %d", code)
+	}
+
+	_, a, _ := e.consoleCall("POST", "tok-founder", "apps", map[string]any{"name": "Toko Online", "merchant_id": "mch_777_88"})
+	key, appID := a["api_key"].(string), a["app"].(map[string]any)["id"].(string)
+
+	// putuskan: sesi Shopee dihapus, tagihan baru ditolak, aplikasi tetap ada
+	if code, out, _ := e.consoleCall("POST", "tok-founder", "merchants/mch_777_88/disconnect", nil); code != http.StatusOK || out["status"] != "disconnected" {
+		t.Fatalf("disconnect: %d %v", code, out)
+	}
+	m, _ := e.st.GetMerchant(ctx, "mch_777_88")
+	if m.Status != ledger.MerchantDisconnected || len(m.SessionJSON) != 0 || m.StaticQris == "" {
+		t.Fatalf("after disconnect: %+v", m)
+	}
+	if code, _ := e.do("POST", "/api/v2/invoices", key, map[string]any{"order_id": "o-x", "amount": 10000}); code < 400 {
+		t.Fatalf("disconnected merchant must not take invoices: %d", code)
+	}
+
+	// hapus ditolak selama masih ada aplikasi
+	if code, out, _ := e.consoleCall("DELETE", "tok-founder", "merchants/mch_777_88", nil); code != http.StatusConflict || out["code"] != "MERCHANT_HAS_APPS" {
+		t.Fatalf("release with apps: %d %v", code, out)
+	}
+	e.consoleCall("DELETE", "tok-founder", "apps/"+appID, nil)
+	if code, _, _ := e.consoleCall("DELETE", "tok-founder", "merchants/mch_777_88", nil); code != http.StatusOK {
+		t.Fatalf("release: %d", code)
+	}
+	if m, _ := e.st.GetMerchant(ctx, "mch_777_88"); m.OrgID != "" {
+		t.Fatalf("released merchant must be unowned: %+v", m.OrgID)
+	}
+	_, list := e.console("tok-founder", "merchants")
+	for _, raw := range list["merchants"].([]any) {
+		if raw.(map[string]any)["id"] == "mch_777_88" {
+			t.Fatalf("released merchant still listed")
+		}
+	}
+	// org lain kini boleh menghubungkannya lewat OTP
+	id := e.otpRequest("tok-other")
+	if code, out := e.connectOTP("tok-other", id, "777888", nil); code != http.StatusOK || out["status"] != "CONNECTED" {
+		t.Fatalf("reconnect by another org: %d %v", code, out)
+	}
+}
