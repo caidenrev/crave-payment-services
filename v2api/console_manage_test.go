@@ -17,36 +17,69 @@ import (
 // fakeLogin meniru login OTP Shopee Partner.
 //
 //	123456 → merchant 999 / store 55        222222 → harus pilih merchant (901, 902)
-//	777888 → merchant 777 / store 88 (sudah milik org founder)   lainnya → kode salah
-type fakeLogin struct{}
+//	777888 → merchant 777 / store 88 (sudah milik org founder)
+//	333333 → merchant 503; Complete gagal sebanyak slowCompletes kali (Shopee lambat)
+//	lainnya → kode salah
+type fakeLogin struct{ slowCompletes int }
 
-func (fakeLogin) RequestOtp(_ context.Context, phone, _ string, channel int) (*shopee.OtpChallenge, error) {
+func (*fakeLogin) RequestOtp(_ context.Context, phone, _ string, channel int) (*shopee.OtpChallenge, error) {
 	if phone == "0000" {
 		return nil, errors.New("nomor tidak terdaftar")
 	}
 	return &shopee.OtpChallenge{PhoneNumber: "+6281234567890", Channel: channel, RiskToken: "rahasia-risk-token"}, nil
 }
 
-func (fakeLogin) VerifyOtp(_ context.Context, ch shopee.OtpChallenge, otp string) (*shopee.Session, *shopee.OtpVerification, error) {
+func single(id, name string) *shopee.OtpVerification {
+	return &shopee.OtpVerification{TocNonce: "nonce", Merchants: []shopee.MerchantSummary{{ID: id, Name: name, IsActive: true}}}
+}
+
+func (*fakeLogin) VerifyOtp(_ context.Context, ch shopee.OtpChallenge, otp string) (*shopee.OtpVerification, error) {
 	if ch.RiskToken != "rahasia-risk-token" {
-		return nil, nil, errors.New("challenge rusak")
+		return nil, errors.New("challenge rusak")
 	}
 	switch otp {
 	case "123456":
-		return &shopee.Session{Merchant: shopee.MerchantSummary{ID: "999", Name: "Toko Baru"}, StoreID: "55"}, nil, nil
+		return single("999", "Toko Baru"), nil
 	case "777888":
-		return &shopee.Session{Merchant: shopee.MerchantSummary{ID: "777", Name: "Kopi Senja"}, StoreID: "88"}, nil, nil
+		return single("777", "Kopi Senja"), nil
+	case "333333":
+		return single("503", "Toko Lambat"), nil
 	case "222222":
-		return nil, &shopee.OtpVerification{TocNonce: "nonce", Merchants: []shopee.MerchantSummary{{ID: "901", Name: "Cabang A"}, {ID: "902", Name: "Cabang B"}}}, nil
+		return &shopee.OtpVerification{TocNonce: "nonce", Merchants: []shopee.MerchantSummary{{ID: "901", Name: "Cabang A", IsActive: true}, {ID: "902", Name: "Cabang B", IsActive: true}}}, nil
 	}
-	return nil, nil, errors.New("kode OTP salah")
+	return nil, errors.New("kode OTP salah")
 }
 
-func (fakeLogin) Complete(_ context.Context, v shopee.OtpVerification, merchantID, _ string) (*shopee.Session, error) {
+var fakeStores = map[string]string{"999": "55", "777": "88"}
+
+func (f *fakeLogin) Complete(_ context.Context, v shopee.OtpVerification, merchantID, _ string) (*shopee.Session, error) {
 	if v.TocNonce != "nonce" {
 		return nil, errors.New("verification rusak")
 	}
-	return &shopee.Session{Merchant: shopee.MerchantSummary{ID: merchantID, Name: "Pilihan " + merchantID}, StoreID: "1"}, nil
+	if merchantID == "503" && f.slowCompletes > 0 {
+		f.slowCompletes--
+		return nil, errors.New("get-store-list: context deadline exceeded")
+	}
+	store := fakeStores[merchantID]
+	if store == "" {
+		store = "1"
+	}
+	return &shopee.Session{Merchant: shopee.MerchantSummary{ID: merchantID, Name: "Pilihan " + merchantID}, StoreID: store}, nil
+}
+
+// connectOTP menjalankan verify lalu complete seperti console; mengembalikan respons complete.
+func (e *env) connectOTP(token, challengeID, otp string, extra map[string]any) (int, map[string]any) {
+	e.t.Helper()
+	body := map[string]any{"challenge_id": challengeID, "otp": otp}
+	for k, v := range extra {
+		body[k] = v
+	}
+	code, out, _ := e.consoleCall("POST", token, "merchants/otp/verify", body)
+	if code != http.StatusOK || out["status"] != "VERIFIED" {
+		return code, out
+	}
+	code, out, _ = e.consoleCall("POST", token, "merchants/otp/complete", map[string]any{"verification_id": out["verification_id"], "merchant_id": out["merchant_id"]})
+	return code, out
 }
 
 // consoleCall memanggil endpoint console dengan metode & body bebas.
@@ -71,7 +104,7 @@ func (e *env) consoleCall(method, token, path string, body any, org ...string) (
 // manageEnv: founder (owner org bootstrap), plus org lain berisi pengguna tok-other (owner).
 func (e *env) manageEnv() (founderOrg string) {
 	e.consoleEnv()
-	e.srv.Login = fakeLogin{}
+	e.srv.Login = &fakeLogin{}
 	e.srv.AllowInsecureWebhooks = true
 	_, me := e.console("tok-founder", "me")
 	ctx := context.Background()
@@ -113,7 +146,7 @@ func TestConsoleConnectMerchantOTP(t *testing.T) {
 	if code, _, _ := e.consoleCall("POST", "tok-founder", "merchants/otp/verify", map[string]any{"challenge_id": retry, "otp": "123456", "static_qris": "bukan-qris"}); code != http.StatusBadRequest {
 		t.Fatalf("invalid static qris: %d", code)
 	}
-	code, out, _ = e.consoleCall("POST", "tok-founder", "merchants/otp/verify", map[string]any{"challenge_id": retry, "otp": "123456", "static_qris": staticQris(t)})
+	code, out = e.connectOTP("tok-founder", retry, "123456", map[string]any{"static_qris": staticQris(t)})
 	if code != http.StatusOK || out["status"] != "CONNECTED" {
 		t.Fatalf("connect: %d %v", code, out)
 	}
@@ -124,6 +157,32 @@ func TestConsoleConnectMerchantOTP(t *testing.T) {
 	_, list := e.console("tok-founder", "merchants")
 	if len(list["merchants"].([]any)) != 2 {
 		t.Fatalf("founder now has two merchants: %v", list)
+	}
+}
+
+// Shopee lambat setelah OTP diterima: login bisa dicoba lagi tanpa OTP baru.
+func TestConsoleConnectRetryAfterSlowShopee(t *testing.T) {
+	e := newEnv(t)
+	founderOrg := e.manageEnv()
+	e.srv.Login = &fakeLogin{slowCompletes: 1}
+	id := e.otpRequest("tok-founder")
+	code, out, _ := e.consoleCall("POST", "tok-founder", "merchants/otp/verify", map[string]any{"challenge_id": id, "otp": "333333", "static_qris": staticQris(t)})
+	if code != http.StatusOK || out["status"] != "VERIFIED" || out["merchant_id"] != "503" {
+		t.Fatalf("verify: %d %v", code, out)
+	}
+	vid := out["verification_id"].(string)
+	code, out, _ = e.consoleCall("POST", "tok-founder", "merchants/otp/complete", map[string]any{"verification_id": vid, "merchant_id": "503"})
+	retry, _ := out["verification_id"].(string)
+	if code != http.StatusBadRequest || retry == "" || retry == vid || out["attempts_left"] != float64(2) {
+		t.Fatalf("slow shopee must allow a retry: %d %v", code, out)
+	}
+	code, out, _ = e.consoleCall("POST", "tok-founder", "merchants/otp/complete", map[string]any{"verification_id": retry, "merchant_id": "503"})
+	if code != http.StatusOK || out["status"] != "CONNECTED" {
+		t.Fatalf("retry complete: %d %v", code, out)
+	}
+	// QRIS statis dari langkah verify ikut tersimpan
+	if m, _ := e.st.GetMerchant(context.Background(), "mch_503_1"); m.OrgID != founderOrg || m.StaticQris == "" {
+		t.Fatalf("merchant after retry: %+v", m)
 	}
 }
 
@@ -156,7 +215,7 @@ func TestConsoleConnectRejectsForeignMerchant(t *testing.T) {
 	founderOrg := e.manageEnv()
 	// mch_777_88 sudah diklaim org founder saat bootstrap; org lain mencoba login merchant yang sama
 	id := e.otpRequest("tok-other")
-	code, out, _ := e.consoleCall("POST", "tok-other", "merchants/otp/verify", map[string]any{"challenge_id": id, "otp": "777888"})
+	code, out := e.connectOTP("tok-other", id, "777888", nil)
 	if code != http.StatusConflict || out["code"] != "MERCHANT_OWNED" {
 		t.Fatalf("foreign merchant must be refused: %d %v", code, out)
 	}

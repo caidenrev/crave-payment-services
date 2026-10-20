@@ -532,6 +532,12 @@ func UsableMerchants(merchants []MerchantSummary) []MerchantSummary {
 	return out
 }
 
+// ResolveSingleMerchant returns the merchant to log into when the account
+// leaves no choice (one usable merchant, or one marked as the current login).
+func ResolveSingleMerchant(merchants []MerchantSummary) (MerchantSummary, bool) {
+	return resolveSingleMerchant(merchants)
+}
+
 func resolveSingleMerchant(merchants []MerchantSummary) (MerchantSummary, bool) {
 	usable := UsableMerchants(merchants)
 	current := make([]MerchantSummary, 0, len(usable))

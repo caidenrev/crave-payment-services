@@ -57,6 +57,7 @@ type challengeState struct {
 type verificationState struct {
 	Verification shopee.OtpVerification `json:"verification"`
 	StaticQris   string                 `json:"static_qris"`
+	Attempts     int                    `json:"attempts"`
 }
 
 // saveOtp menyimpan state login terenkripsi dan mengembalikan ID sekali pakai.
@@ -166,7 +167,10 @@ func (s *Server) consoleOtpVerify(w http.ResponseWriter, r *http.Request, org le
 	if !s.takeOtp(w, r, org, user, req.ChallengeID, otpKindChallenge, &st) {
 		return
 	}
-	sess, verif, err := s.shopeeLogin().VerifyOtp(r.Context(), st.Challenge, strings.TrimSpace(req.OTP))
+	verif, err := s.shopeeLogin().VerifyOtp(r.Context(), st.Challenge, strings.TrimSpace(req.OTP))
+	if err == nil && verif == nil {
+		err = errors.New("verifikasi OTP tidak mengembalikan data")
+	}
 	if err != nil {
 		// kode salah: beri kesempatan mencoba lagi tanpa meminta OTP baru (maks. 3x)
 		st.Attempts++
@@ -180,20 +184,22 @@ func (s *Server) consoleOtpVerify(w http.ResponseWriter, r *http.Request, org le
 		writeJSON(w, http.StatusBadRequest, out)
 		return
 	}
-	if verif != nil {
-		id, err := s.saveOtp(r, org, user, otpKindVerification, verificationState{Verification: *verif, StaticQris: strings.TrimSpace(req.StaticQris)})
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "STORE_ERROR", "Gagal menyimpan sesi login")
-			return
-		}
-		merchants := make([]map[string]any, 0, len(verif.Merchants))
-		for _, m := range verif.Merchants {
-			merchants = append(merchants, map[string]any{"id": m.ID, "name": m.Name, "active": m.IsActive})
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"success": true, "status": "MERCHANT_SELECTION_NEEDED", "verification_id": id, "merchants": merchants})
+	// OTP diterima. Login diselesaikan lewat merchants/otp/complete (request
+	// terpisah), jadi verification disimpan dulu.
+	id, err := s.saveOtp(r, org, user, otpKindVerification, verificationState{Verification: *verif, StaticQris: strings.TrimSpace(req.StaticQris)})
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "STORE_ERROR", "Gagal menyimpan sesi login")
 		return
 	}
-	s.finishConnect(w, r, org, sess, req.StaticQris)
+	if one, ok := shopee.ResolveSingleMerchant(verif.Merchants); ok {
+		writeJSON(w, http.StatusOK, map[string]any{"success": true, "status": "VERIFIED", "verification_id": id, "merchant_id": one.ID, "merchant_name": one.Name})
+		return
+	}
+	merchants := make([]map[string]any, 0, len(verif.Merchants))
+	for _, m := range verif.Merchants {
+		merchants = append(merchants, map[string]any{"id": m.ID, "name": m.Name, "active": m.IsActive})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "status": "MERCHANT_SELECTION_NEEDED", "verification_id": id, "merchants": merchants})
 }
 
 func (s *Server) consoleOtpComplete(w http.ResponseWriter, r *http.Request, org ledger.Membership, user ConsoleUser) {
@@ -220,7 +226,17 @@ func (s *Server) consoleOtpComplete(w http.ResponseWriter, r *http.Request, org 
 	}
 	sess, err := s.shopeeLogin().Complete(r.Context(), st.Verification, strings.TrimSpace(req.MerchantID), strings.TrimSpace(req.StoreID))
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "LOGIN_FAILED", err.Error())
+		// OTP sudah diterima; gangguan di tahap ini (mis. Shopee lambat) bisa
+		// dicoba lagi tanpa meminta OTP baru (maks. 3x).
+		st.Attempts++
+		out := map[string]any{"success": false, "code": "LOGIN_FAILED", "error": err.Error()}
+		if st.Attempts < otpMaxAttempts {
+			if id, err := s.saveOtp(r, org, user, otpKindVerification, st); err == nil {
+				out["verification_id"] = id
+				out["attempts_left"] = otpMaxAttempts - st.Attempts
+			}
+		}
+		writeJSON(w, http.StatusBadRequest, out)
 		return
 	}
 	qris := strings.TrimSpace(req.StaticQris)
