@@ -319,6 +319,11 @@ func (s *Server) putWebhook(w http.ResponseWriter, r *http.Request, appID string
 	if !ok {
 		return
 	}
+	s.writeWebhookUpdate(w, r, app)
+}
+
+// writeWebhookUpdate membaca {url} dan mengatur webhook aplikasi (dipakai admin & console).
+func (s *Server) writeWebhookUpdate(w http.ResponseWriter, r *http.Request, app ledger.App) {
 	var req struct {
 		URL string `json:"url"`
 	}
