@@ -54,8 +54,11 @@ const (
 	inlineLease   = 2 * time.Minute
 	inlineTimeout = 4 * time.Second
 	sweepLease    = 2 * time.Minute
-	// Batas kerja satu sweep; sisa pekerjaan dilanjutkan sweep berikutnya.
-	sweepBudget = 20 * time.Second
+	// Batas kerja satu sweep (fungsi Vercel bawaan ±10 dtk); sisa pekerjaan
+	// dilanjutkan sweep menit berikutnya.
+	sweepBudget = 6 * time.Second
+	// Batas satu kiriman webhook dari sweep.
+	sweepSendTimeout = 3 * time.Second
 	// Tagihan yang baru dicek (popup/server) dalam jeda ini dilewati sweep.
 	sweepStale        = 20 * time.Second
 	sweepInvoiceLimit = 50
@@ -279,7 +282,7 @@ func (s *Server) sweep(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					app = ledger.App{ID: ev.AppID}
 				}
-				res := s.attempt(ctx, app, ev, 5*time.Second)
+				res := s.attempt(ctx, app, ev, sweepSendTimeout)
 				switch res.Status {
 				case ledger.EventDelivered:
 					sum["delivered"]++

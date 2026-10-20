@@ -104,7 +104,7 @@ func newProviderClient(sess *shopee.Session) ShopeeClient {
 func Handle(w http.ResponseWriter, r *http.Request) {
 	timeout := 8 * time.Second
 	if strings.HasSuffix(strings.TrimSuffix(r.URL.Path, "/"), "/internal/sweep") {
-		timeout = sweepBudget + 5*time.Second
+		timeout = sweepBudget + sweepSendTimeout
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
