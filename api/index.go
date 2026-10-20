@@ -81,7 +81,7 @@ func getDefaultProvider() (*shopee.Provider, *payment.Service, error) {
 func Handler(w http.ResponseWriter, r *http.Request) {
 	// CORS Headers for any SaaS domain
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, PATCH, DELETE")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, X-Shopee-Session, X-Static-Qris, X-Client-Key, X-Org-Id")
 
 	if r.Method == "OPTIONS" {

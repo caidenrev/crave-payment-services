@@ -23,6 +23,12 @@ type MemoryStore struct {
 	events    map[string]WebhookEvent // id -> event
 	orgs      map[string]Org
 	members   map[string]Membership // orgID + "/" + userID
+	otp       map[string]memOtp
+}
+
+type memOtp struct {
+	s    OtpSession
+	used bool
 }
 
 type memToken struct {
@@ -44,7 +50,95 @@ func NewMemoryStore() *MemoryStore {
 		events:    map[string]WebhookEvent{},
 		orgs:      map[string]Org{},
 		members:   map[string]Membership{},
+		otp:       map[string]memOtp{},
 	}
+}
+
+func (s *MemoryStore) SetMerchantOrg(_ context.Context, merchantID, orgID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, ok := s.merchants[merchantID]
+	if !ok || (m.OrgID != "" && m.OrgID != orgID) {
+		return false, nil
+	}
+	m.OrgID = orgID
+	s.merchants[merchantID] = m
+	return true, nil
+}
+
+func (s *MemoryStore) SetKeyHash(_ context.Context, appID, keyHash string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.apps[appID]; !ok {
+		return ErrNotFound
+	}
+	for h, id := range s.keys {
+		if id == appID {
+			delete(s.keys, h)
+		}
+	}
+	s.keys[keyHash] = appID
+	return nil
+}
+
+func (s *MemoryStore) RenameApp(_ context.Context, appID, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, ok := s.apps[appID]
+	if !ok {
+		return ErrNotFound
+	}
+	a.Name = name
+	s.apps[appID] = a
+	return nil
+}
+
+func (s *MemoryStore) DeleteApp(_ context.Context, appID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.apps[appID]; !ok {
+		return ErrNotFound
+	}
+	delete(s.apps, appID)
+	for h, id := range s.keys {
+		if id == appID {
+			delete(s.keys, h)
+		}
+	}
+	return nil
+}
+
+func (s *MemoryStore) SaveOtpSession(_ context.Context, o OtpSession) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	o.CreatedAt = time.Now()
+	o.Data = append([]byte(nil), o.Data...)
+	s.otp[o.ID] = memOtp{s: o}
+	return nil
+}
+
+func (s *MemoryStore) TakeOtpSession(_ context.Context, id, orgID, userID string, now time.Time) (OtpSession, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.otp[id]
+	if !ok || e.used || e.s.OrgID != orgID || e.s.UserID != userID || !now.Before(e.s.ExpiresAt) {
+		return OtpSession{}, ErrNotFound
+	}
+	e.used = true
+	s.otp[id] = e
+	return e.s, nil
+}
+
+func (s *MemoryStore) CountOtpSessions(_ context.Context, userID string, since time.Time) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, e := range s.otp {
+		if e.s.UserID == userID && e.s.Kind == "challenge" && !e.s.CreatedAt.Before(since) {
+			n++
+		}
+	}
+	return n, nil
 }
 
 func (s *MemoryStore) CreateOrg(_ context.Context, org Org) error {

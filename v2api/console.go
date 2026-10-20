@@ -175,15 +175,16 @@ func (s *Server) consoleOrg(w http.ResponseWriter, r *http.Request, user Console
 }
 
 func (s *Server) routeConsole(w http.ResponseWriter, r *http.Request, parts []string) {
-	if r.Method != http.MethodGet || len(parts) != 1 {
-		writeErr(w, http.StatusNotFound, "NOT_FOUND", "Endpoint console tidak ditemukan")
+	notFound := func() { writeErr(w, http.StatusNotFound, "NOT_FOUND", "Endpoint console tidak ditemukan") }
+	if len(parts) == 0 || parts[0] == "" {
+		notFound()
 		return
 	}
 	user, ok := s.consoleUser(w, r)
 	if !ok {
 		return
 	}
-	if parts[0] == "me" {
+	if len(parts) == 1 && parts[0] == "me" && r.Method == http.MethodGet {
 		s.consoleMe(w, r, user)
 		return
 	}
@@ -191,15 +192,37 @@ func (s *Server) routeConsole(w http.ResponseWriter, r *http.Request, parts []st
 	if !ok {
 		return
 	}
-	switch parts[0] {
-	case "merchants":
+	m, n := r.Method, len(parts)
+	switch {
+	case m == http.MethodGet && n == 1 && parts[0] == "merchants":
 		s.consoleMerchants(w, r, org)
-	case "apps":
+	case m == http.MethodGet && n == 1 && parts[0] == "apps":
 		s.consoleApps(w, r, org)
-	case "invoices":
+	case m == http.MethodGet && n == 1 && parts[0] == "invoices":
 		s.consoleInvoices(w, r, org)
+
+	// hubungkan merchant lewat OTP Shopee (console_manage.go)
+	case m == http.MethodPost && n == 3 && parts[0] == "merchants" && parts[1] == "otp":
+		switch parts[2] {
+		case "request":
+			s.consoleOtpRequest(w, r, org, user)
+		case "verify":
+			s.consoleOtpVerify(w, r, org, user)
+		case "complete":
+			s.consoleOtpComplete(w, r, org, user)
+		default:
+			notFound()
+		}
+	case m == http.MethodPut && n == 3 && parts[0] == "merchants" && parts[2] == "static-qris":
+		s.consoleSetStaticQris(w, r, org, parts[1])
+
+	// kelola aplikasi & API key
+	case m == http.MethodPost && n == 1 && parts[0] == "apps":
+		s.consoleCreateApp(w, r, org)
+	case n >= 2 && parts[0] == "apps":
+		s.consoleAppAction(w, r, org, parts[1], parts[2:])
 	default:
-		writeErr(w, http.StatusNotFound, "NOT_FOUND", "Endpoint console tidak ditemukan")
+		notFound()
 	}
 }
 

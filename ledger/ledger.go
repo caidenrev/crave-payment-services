@@ -196,6 +196,36 @@ type Store interface {
 	MerchantsByOrg(ctx context.Context, orgID string) ([]Merchant, error)
 	// InvoicesForMerchants returns invoices of the merchants created since, newest first.
 	InvoicesForMerchants(ctx context.Context, merchantIDs []string, since time.Time, limit int) ([]Invoice, error)
+
+	// SetMerchantOrg gives an unowned merchant to orgID; false when another org owns it.
+	SetMerchantOrg(ctx context.Context, merchantID, orgID string) (bool, error)
+	// SetKeyHash replaces an app's secret key (the old key stops working at once).
+	SetKeyHash(ctx context.Context, appID, keyHash string) error
+	RenameApp(ctx context.Context, appID, name string) error
+	// DeleteApp revokes an app: its keys and webhook stop working; invoices stay.
+	// Deleted apps are invisible to AppByID, AppByKeyHash and ListApps.
+	DeleteApp(ctx context.Context, appID string) error
+
+	// SaveOtpSession stores encrypted intermediate Shopee login state for a console user.
+	SaveOtpSession(ctx context.Context, s OtpSession) error
+	// TakeOtpSession returns a session owned by org+user that has not expired and
+	// marks it used (single use); ErrNotFound otherwise.
+	TakeOtpSession(ctx context.Context, id, orgID, userID string, now time.Time) (OtpSession, error)
+	// CountOtpSessions counts OTP challenges a user requested since (rate limit).
+	CountOtpSessions(ctx context.Context, userID string, since time.Time) (int, error)
+}
+
+// OtpSession is short-lived Shopee login state (OTP challenge or verification)
+// kept server-side so cookies/tokens never reach the browser. Data is plaintext
+// here; stores encrypt it at rest.
+type OtpSession struct {
+	ID        string
+	OrgID     string
+	UserID    string
+	Kind      string // "challenge" | "verification"
+	Data      []byte
+	ExpiresAt time.Time
+	CreatedAt time.Time
 }
 
 // Window bounds which transactions may settle a bill.
