@@ -90,6 +90,8 @@ type Server struct {
 	BootstrapEmail string
 	// ConsoleAuth mengganti verifikasi Supabase (untuk tes); nil = Supabase.
 	ConsoleAuth func(ctx context.Context, token string) (ConsoleUser, error)
+	// Login mengganti login OTP Shopee (untuk tes); nil = Shopee sungguhan.
+	Login ShopeeLogin
 }
 
 type providerClient struct{ p *shopee.Provider }
@@ -354,27 +356,9 @@ func (s *Server) saveLoggedIn(w http.ResponseWriter, r *http.Request, provider *
 			}
 		}
 	}
-	raw, err := json.Marshal(session)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "SESSION_ENCODE", err.Error())
-		return
-	}
-	m := ledger.Merchant{
-		ID: merchantKey(session), Name: session.Merchant.Name, ShopeeMerchantID: session.Merchant.ID,
-		StoreID: session.StoreID, SessionJSON: raw, Status: ledger.MerchantConnected,
-	}
-	if existing, err := s.Store.GetMerchant(r.Context(), m.ID); err == nil {
-		m.StaticQris = existing.StaticQris // login ulang tidak menghapus QRIS statis yang sudah diatur
-	}
-	if q := strings.TrimSpace(staticQris); q != "" {
-		if err := validateStatic(q); err != nil {
-			writeErr(w, http.StatusBadRequest, "INVALID_QRIS", err.Error())
-			return
-		}
-		m.StaticQris = q
-	}
-	if err := s.Store.SaveMerchant(r.Context(), m); err != nil {
-		writeErr(w, http.StatusInternalServerError, "STORE_ERROR", "Gagal menyimpan merchant")
+	m, apiErr := s.persistMerchant(r.Context(), session, staticQris, "")
+	if apiErr != nil {
+		apiErr.write(w)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "status": "CONNECTED", "merchant": merchantView(m)})
@@ -455,37 +439,55 @@ func (s *Server) createApp(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	if strings.TrimSpace(req.Name) == "" {
-		writeErr(w, http.StatusBadRequest, "INVALID", "Nama aplikasi wajib diisi")
-		return
-	}
 	if _, err := s.Store.GetMerchant(r.Context(), req.MerchantID); err != nil {
 		writeErr(w, http.StatusBadRequest, "INVALID", "merchant_id tidak ditemukan")
 		return
 	}
+	app, key, apiErr := s.newApp(r.Context(), req.Name, req.MerchantID)
+	if apiErr != nil {
+		apiErr.write(w)
+		return
+	}
+	writeJSON(w, http.StatusCreated, newAppResponse(app, key))
+}
+
+func newSecretKey() (string, error) {
 	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {
-		writeErr(w, http.StatusInternalServerError, "RANDOM", "Gagal membuat API key")
-		return
+		return "", err
 	}
-	key := "pgk_" + base64.RawURLEncoding.EncodeToString(buf)
+	return "pgk_" + base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+// newApp membuat aplikasi baru untuk merchant beserta secret key & client key.
+func (s *Server) newApp(ctx context.Context, name, merchantID string) (ledger.App, string, *apiError) {
+	name = strings.TrimSpace(name)
+	if name == "" || len([]rune(name)) > 60 {
+		return ledger.App{}, "", &apiError{http.StatusBadRequest, "INVALID", "Nama aplikasi wajib diisi (maks. 60 karakter)"}
+	}
+	key, err := newSecretKey()
+	if err != nil {
+		return ledger.App{}, "", &apiError{http.StatusInternalServerError, "RANDOM", "Gagal membuat API key"}
+	}
 	clientKey, err := newClientKey()
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "RANDOM", "Gagal membuat client key")
-		return
+		return ledger.App{}, "", &apiError{http.StatusInternalServerError, "RANDOM", "Gagal membuat client key"}
 	}
-	app := ledger.App{ID: "app_" + strings.TrimPrefix(utils.PaymentID(), "pay_"), Name: strings.TrimSpace(req.Name), MerchantID: req.MerchantID, ClientKey: clientKey}
-	if err := s.Store.CreateApp(r.Context(), app, hashKey(key)); err != nil {
-		writeErr(w, http.StatusInternalServerError, "STORE_ERROR", "Gagal menyimpan aplikasi")
-		return
+	app := ledger.App{ID: "app_" + strings.TrimPrefix(utils.PaymentID(), "pay_"), Name: name, MerchantID: merchantID, ClientKey: clientKey}
+	if err := s.Store.CreateApp(ctx, app, hashKey(key)); err != nil {
+		return ledger.App{}, "", &apiError{http.StatusInternalServerError, "STORE_ERROR", "Gagal menyimpan aplikasi"}
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"app": map[string]any{"id": app.ID, "name": app.Name, "merchant_id": app.MerchantID},
+	return app, key, nil
+}
+
+func newAppResponse(app ledger.App, key string) map[string]any {
+	return map[string]any{
+		"app": map[string]any{"id": app.ID, "name": app.Name, "merchant_id": app.MerchantID, "client_key": app.ClientKey},
 		// hanya ditampilkan sekali; gateway menyimpan hash-nya saja
 		"api_key": key,
-		// publik, boleh di browser; selalu bisa dilihat lagi lewat GET /admin/apps
-		"client_key": clientKey,
-	})
+		// publik, boleh di browser; selalu bisa dilihat lagi
+		"client_key": app.ClientKey,
+	}
 }
 
 /* ----------------------------------------------------------------- app */
