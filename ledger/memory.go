@@ -166,7 +166,8 @@ func (s *MemoryStore) AddMember(_ context.Context, m Membership) error {
 	defer s.mu.Unlock()
 	key := m.OrgID + "/" + m.UserID
 	if old, ok := s.members[key]; ok {
-		m.CreatedAt = old.CreatedAt
+		// seperti Postgres: hanya email & peran yang diperbarui
+		m.CreatedAt, m.InvitedBy, m.JoinedAt = old.CreatedAt, old.InvitedBy, old.JoinedAt
 	} else {
 		m.CreatedAt = time.Now()
 	}
@@ -186,6 +187,54 @@ func (s *MemoryStore) MembershipsForUser(_ context.Context, userID string) ([]Me
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
 	return out, nil
+}
+
+func (s *MemoryStore) MembersOfOrg(_ context.Context, orgID string) ([]Membership, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Membership
+	for _, m := range s.members {
+		if m.OrgID == orgID {
+			m.OrgName = s.orgs[m.OrgID].Name
+			out = append(out, m)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	return out, nil
+}
+
+func (s *MemoryStore) SetMemberRole(_ context.Context, orgID, userID, role string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, ok := s.members[orgID+"/"+userID]
+	if !ok {
+		return ErrNotFound
+	}
+	m.Role = role
+	s.members[orgID+"/"+userID] = m
+	return nil
+}
+
+func (s *MemoryStore) RemoveMember(_ context.Context, orgID, userID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.members[orgID+"/"+userID]; !ok {
+		return ErrNotFound
+	}
+	delete(s.members, orgID+"/"+userID)
+	return nil
+}
+
+func (s *MemoryStore) MarkJoined(_ context.Context, userID string, at time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, m := range s.members {
+		if m.UserID == userID && m.JoinedAt.IsZero() {
+			m.JoinedAt = at
+			s.members[k] = m
+		}
+	}
+	return nil
 }
 
 func (s *MemoryStore) ClaimUnownedMerchants(_ context.Context, orgID string) (int, error) {

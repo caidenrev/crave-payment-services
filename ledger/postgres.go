@@ -102,6 +102,8 @@ create table if not exists gateway_org_members (
   primary key (org_id, user_id)
 );
 create index if not exists gateway_org_members_user on gateway_org_members (user_id);
+alter table gateway_org_members add column if not exists invited_by text not null default '';
+alter table gateway_org_members add column if not exists joined_at timestamptz;
 alter table gateway_merchants add column if not exists org_id text references gateway_orgs(id);
 create index if not exists gateway_invoices_merchant_created on gateway_invoices (merchant_id, created_at desc);
 alter table gateway_apps add column if not exists deleted_at timestamptz;
@@ -560,15 +562,22 @@ func (s *PostgresStore) CreateOrg(ctx context.Context, org Org) error {
 }
 
 func (s *PostgresStore) AddMember(ctx context.Context, m Membership) error {
-	_, err := s.db.ExecContext(ctx, `insert into gateway_org_members (org_id, user_id, email, role) values ($1,$2,$3,$4)
-		on conflict (org_id, user_id) do update set email = excluded.email, role = excluded.role`, m.OrgID, m.UserID, m.Email, m.Role)
+	var joined any
+	if !m.JoinedAt.IsZero() {
+		joined = m.JoinedAt
+	}
+	_, err := s.db.ExecContext(ctx, `insert into gateway_org_members (org_id, user_id, email, role, invited_by, joined_at) values ($1,$2,$3,$4,$5,$6)
+		on conflict (org_id, user_id) do update set email = excluded.email, role = excluded.role`,
+		m.OrgID, m.UserID, m.Email, m.Role, m.InvitedBy, joined)
 	return err
 }
 
-func (s *PostgresStore) MembershipsForUser(ctx context.Context, userID string) ([]Membership, error) {
-	rows, err := s.db.QueryContext(ctx, `select m.org_id, o.name, m.user_id, m.email, m.role, m.created_at
+const memberCols = `m.org_id, o.name, m.user_id, m.email, m.role, m.created_at, m.invited_by, coalesce(m.joined_at, 'epoch'::timestamptz)`
+
+func (s *PostgresStore) queryMembers(ctx context.Context, where string, arg string) ([]Membership, error) {
+	rows, err := s.db.QueryContext(ctx, `select `+memberCols+`
 		from gateway_org_members m join gateway_orgs o on o.id = m.org_id
-		where m.user_id = $1 order by m.created_at`, userID)
+		where `+where+` order by m.created_at`, arg)
 	if err != nil {
 		return nil, err
 	}
@@ -576,12 +585,47 @@ func (s *PostgresStore) MembershipsForUser(ctx context.Context, userID string) (
 	var out []Membership
 	for rows.Next() {
 		var m Membership
-		if err := rows.Scan(&m.OrgID, &m.OrgName, &m.UserID, &m.Email, &m.Role, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.OrgID, &m.OrgName, &m.UserID, &m.Email, &m.Role, &m.CreatedAt, &m.InvitedBy, &m.JoinedAt); err != nil {
 			return nil, err
+		}
+		if m.JoinedAt.Unix() == 0 {
+			m.JoinedAt = time.Time{}
 		}
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+func (s *PostgresStore) MembershipsForUser(ctx context.Context, userID string) ([]Membership, error) {
+	return s.queryMembers(ctx, `m.user_id = $1`, userID)
+}
+
+func (s *PostgresStore) MembersOfOrg(ctx context.Context, orgID string) ([]Membership, error) {
+	return s.queryMembers(ctx, `m.org_id = $1`, orgID)
+}
+
+func (s *PostgresStore) memberExec(ctx context.Context, q string, args ...any) error {
+	res, err := s.db.ExecContext(ctx, q, args...)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) SetMemberRole(ctx context.Context, orgID, userID, role string) error {
+	return s.memberExec(ctx, `update gateway_org_members set role = $3 where org_id = $1 and user_id = $2`, orgID, userID, role)
+}
+
+func (s *PostgresStore) RemoveMember(ctx context.Context, orgID, userID string) error {
+	return s.memberExec(ctx, `delete from gateway_org_members where org_id = $1 and user_id = $2`, orgID, userID)
+}
+
+func (s *PostgresStore) MarkJoined(ctx context.Context, userID string, at time.Time) error {
+	_, err := s.db.ExecContext(ctx, `update gateway_org_members set joined_at = $2 where user_id = $1 and joined_at is null`, userID, at)
+	return err
 }
 
 func (s *PostgresStore) ClaimUnownedMerchants(ctx context.Context, orgID string) (int, error) {

@@ -208,6 +208,35 @@ func TestPostgresConsoleOrgs(t *testing.T) {
 		t.Fatalf("memberships: %+v %v", ms, err)
 	}
 
+	// undangan: belum bergabung sampai kunjungan pertama
+	if err := st.AddMember(ctx, Membership{OrgID: orgID, UserID: "inv_" + sfx, Email: "c@uji.id", Role: RoleDeveloper, InvitedBy: "b@uji.id"}); err != nil {
+		t.Fatal(err)
+	}
+	team, err := st.MembersOfOrg(ctx, orgID)
+	if err != nil || len(team) != 2 || team[1].InvitedBy != "b@uji.id" || !team[1].JoinedAt.IsZero() {
+		t.Fatalf("members of org: %+v %v", team, err)
+	}
+	joined := time.Now().UTC().Truncate(time.Second)
+	if err := st.MarkJoined(ctx, "inv_"+sfx, joined); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetMemberRole(ctx, orgID, "inv_"+sfx, RoleAdmin); err != nil {
+		t.Fatal(err)
+	}
+	team, _ = st.MembersOfOrg(ctx, orgID)
+	if !team[1].JoinedAt.Equal(joined) || team[1].Role != RoleAdmin {
+		t.Fatalf("after join + role change: %+v", team[1])
+	}
+	if err := st.RemoveMember(ctx, orgID, "inv_"+sfx); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RemoveMember(ctx, orgID, "inv_"+sfx); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("remove twice: %v", err)
+	}
+	if err := st.SetMemberRole(ctx, orgID, "nobody", RoleViewer); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("role of non-member: %v", err)
+	}
+
 	if n, err := st.ClaimUnownedMerchants(ctx, orgID); err != nil || n < 2 {
 		t.Fatalf("claim: %d %v", n, err)
 	}
