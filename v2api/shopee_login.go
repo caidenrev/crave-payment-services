@@ -3,7 +3,6 @@ package v2api
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"strings"
 
@@ -15,9 +14,10 @@ import (
 // ShopeeLogin adalah langkah login OTP Shopee Partner (palsu di tes).
 type ShopeeLogin interface {
 	RequestOtp(ctx context.Context, phone, password string, channel int) (*shopee.OtpChallenge, error)
-	// VerifyOtp mengembalikan sesi, atau verification bila akun punya beberapa
-	// merchant dan pengguna harus memilih.
-	VerifyOtp(ctx context.Context, ch shopee.OtpChallenge, otp string) (*shopee.Session, *shopee.OtpVerification, error)
+	// VerifyOtp hanya mengecek kode OTP ke Shopee (cepat). Login diselesaikan
+	// di request terpisah lewat Complete, supaya tiap request muat dalam batas
+	// waktu fungsi serverless.
+	VerifyOtp(ctx context.Context, ch shopee.OtpChallenge, otp string) (*shopee.OtpVerification, error)
 	Complete(ctx context.Context, v shopee.OtpVerification, merchantID, storeID string) (*shopee.Session, error)
 }
 
@@ -48,19 +48,8 @@ func withStore(ctx context.Context, p *shopee.Provider, sess *shopee.Session) *s
 	return sess
 }
 
-func (realShopeeLogin) VerifyOtp(ctx context.Context, ch shopee.OtpChallenge, otp string) (*shopee.Session, *shopee.OtpVerification, error) {
-	p := newLoginProvider()
-	out, err := p.LoginWithOtp(ctx, shopee.LoginWithOtpInput{Challenge: ch, OTP: otp})
-	if err != nil {
-		return nil, nil, err
-	}
-	if out.Status == shopee.LoginMerchantSelectionNeeded {
-		return nil, out.Verification, nil
-	}
-	if out.Session == nil {
-		return nil, nil, errors.New("login berhasil tetapi sesi tidak terbentuk")
-	}
-	return withStore(ctx, p, out.Session), nil, nil
+func (realShopeeLogin) VerifyOtp(ctx context.Context, ch shopee.OtpChallenge, otp string) (*shopee.OtpVerification, error) {
+	return newLoginProvider().VerifyOtp(ctx, shopee.VerifyOtpInput{Challenge: ch, OTP: otp})
 }
 
 func (realShopeeLogin) Complete(ctx context.Context, v shopee.OtpVerification, merchantID, storeID string) (*shopee.Session, error) {
