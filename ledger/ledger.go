@@ -43,7 +43,34 @@ type Merchant struct {
 	// SessionJSON is the decrypted Shopee session (never returned to clients).
 	SessionJSON []byte
 	Status      string
-	UpdatedAt   time.Time
+	// OrgID is the console organisation that owns the merchant ("" = belum dimiliki).
+	OrgID     string
+	UpdatedAt time.Time
+}
+
+// Console roles, from most to least privileged.
+const (
+	RoleOwner     = "owner"
+	RoleAdmin     = "admin"
+	RoleDeveloper = "developer"
+	RoleViewer    = "viewer"
+)
+
+// Org is a console organisation; its members manage the org's merchants and apps.
+type Org struct {
+	ID        string
+	Name      string
+	CreatedAt time.Time
+}
+
+// Membership links a console user (Supabase user id) to an org with a role.
+type Membership struct {
+	OrgID     string
+	OrgName   string
+	UserID    string
+	Email     string
+	Role      string
+	CreatedAt time.Time
 }
 
 // App is a client application (a SaaS) allowed to bill through one merchant.
@@ -157,6 +184,17 @@ type Store interface {
 	ListEvents(ctx context.Context, appID string, limit int) ([]WebhookEvent, error)
 	// SweepCandidates returns pending invoices not checked since staleBefore.
 	SweepCandidates(ctx context.Context, staleBefore time.Time, limit int) ([]Invoice, error)
+
+	CreateOrg(ctx context.Context, org Org) error
+	// AddMember adds a user to an org, or updates their role/email.
+	AddMember(ctx context.Context, m Membership) error
+	// MembershipsForUser returns the user's orgs (with OrgName), oldest first.
+	MembershipsForUser(ctx context.Context, userID string) ([]Membership, error)
+	// ClaimUnownedMerchants assigns every merchant without an org to orgID.
+	ClaimUnownedMerchants(ctx context.Context, orgID string) (int, error)
+	MerchantsByOrg(ctx context.Context, orgID string) ([]Merchant, error)
+	// InvoicesForMerchants returns invoices of the merchants created since, newest first.
+	InvoicesForMerchants(ctx context.Context, merchantIDs []string, since time.Time, limit int) ([]Invoice, error)
 }
 
 // Window bounds which transactions may settle a bill.

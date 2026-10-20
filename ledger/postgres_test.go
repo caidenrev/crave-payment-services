@@ -40,6 +40,10 @@ func openTestPostgres(t *testing.T) (*PostgresStore, string) {
 	t.Cleanup(func() {
 		ctx := context.Background()
 		for _, q := range []string{
+			// klaim merchant di tes ikut mengenai salinan merchant lain di branch: kembalikan dulu
+			`update gateway_merchants set org_id = null where org_id like '%' || $1`,
+			`delete from gateway_org_members where org_id like '%' || $1`,
+			`delete from gateway_orgs where id like '%' || $1`,
 			`delete from gateway_webhook_events where app_id like '%' || $1`,
 			`delete from gateway_checkout_tokens where invoice_id like '%' || $1`,
 			`delete from gateway_invoices where id like '%' || $1`,
@@ -173,6 +177,76 @@ func TestPostgresCheckout(t *testing.T) {
 	list, err := st.ListEvents(ctx, appID, 10)
 	if err != nil || len(list) != 1 || list[0].Status != EventDelivered || list[0].DeliveredAt == nil || string(list[0].Payload) != `{"a": 1}` {
 		t.Fatalf("list events: %+v %v", list, err)
+	}
+}
+
+func TestPostgresConsoleOrgs(t *testing.T) {
+	st, sfx := openTestPostgres(t)
+	ctx := context.Background()
+	orgID, mA, mB := "org_"+sfx, "mch_a_"+sfx, "mch_b_"+sfx
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	for _, id := range []string{mA, mB} {
+		if err := st.SaveMerchant(ctx, Merchant{ID: id, Name: id, Status: MerchantConnected}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.CreateOrg(ctx, Org{ID: orgID, Name: "Uji " + sfx}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddMember(ctx, Membership{OrgID: orgID, UserID: "u_" + sfx, Email: "a@uji.id", Role: RoleViewer}); err != nil {
+		t.Fatal(err)
+	}
+	// upsert: peran & email berubah, tidak dobel
+	if err := st.AddMember(ctx, Membership{OrgID: orgID, UserID: "u_" + sfx, Email: "b@uji.id", Role: RoleOwner}); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := st.MembershipsForUser(ctx, "u_"+sfx)
+	if err != nil || len(ms) != 1 || ms[0].Role != RoleOwner || ms[0].Email != "b@uji.id" || ms[0].OrgName != "Uji "+sfx {
+		t.Fatalf("memberships: %+v %v", ms, err)
+	}
+
+	if n, err := st.ClaimUnownedMerchants(ctx, orgID); err != nil || n < 2 {
+		t.Fatalf("claim: %d %v", n, err)
+	}
+	// menyimpan ulang merchant (mis. login OTP ulang) tidak menghapus pemilik
+	if err := st.SaveMerchant(ctx, Merchant{ID: mA, Name: "baru", Status: MerchantConnected}); err != nil {
+		t.Fatal(err)
+	}
+	owned, err := st.MerchantsByOrg(ctx, orgID)
+	var got []string
+	for _, m := range owned {
+		if m.ID == mA || m.ID == mB {
+			got = append(got, m.ID)
+			if m.OrgID != orgID {
+				t.Fatalf("merchant org: %+v", m)
+			}
+		}
+	}
+	if err != nil || len(got) != 2 {
+		t.Fatalf("merchants by org: %v %v", got, err)
+	}
+
+	// tagihan dua merchant (placeholder ganda) + batas waktu
+	if err := st.CreateApp(ctx, App{ID: "app_" + sfx, Name: "Uji", MerchantID: mA}, "hash_"+sfx); err != nil {
+		t.Fatal(err)
+	}
+	for i, c := range []struct {
+		merchant string
+		at       time.Time
+	}{{mA, now}, {mB, now.Add(-time.Hour)}, {mA, now.Add(-100 * 24 * time.Hour)}} {
+		inv := Invoice{ID: fmt.Sprintf("inv_%d_%s", i, sfx), AppID: "app_" + sfx, MerchantID: c.merchant, OrderID: fmt.Sprintf("o%d", i),
+			Amount: 1000, Status: StatusPending, QRString: "qr", CreatedAt: c.at, ExpiresAt: c.at.Add(10 * time.Minute)}
+		if _, _, err := st.CreateInvoice(ctx, inv); err != nil {
+			t.Fatal(err)
+		}
+	}
+	invs, err := st.InvoicesForMerchants(ctx, []string{mA, mB}, now.Add(-60*24*time.Hour), 100)
+	if err != nil || len(invs) != 2 || invs[0].ID != "inv_0_"+sfx {
+		t.Fatalf("invoices for merchants (newest first, 60 days): %+v %v", invs, err)
+	}
+	if none, err := st.InvoicesForMerchants(ctx, nil, now.Add(-time.Hour), 10); err != nil || len(none) != 0 {
+		t.Fatalf("no merchants: %v %v", none, err)
 	}
 }
 

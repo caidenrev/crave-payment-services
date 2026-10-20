@@ -21,6 +21,8 @@ type MemoryStore struct {
 	checked   map[string]time.Time
 	themes    map[string][]byte
 	events    map[string]WebhookEvent // id -> event
+	orgs      map[string]Org
+	members   map[string]Membership // orgID + "/" + userID
 }
 
 type memToken struct {
@@ -40,7 +42,91 @@ func NewMemoryStore() *MemoryStore {
 		checked:   map[string]time.Time{},
 		themes:    map[string][]byte{},
 		events:    map[string]WebhookEvent{},
+		orgs:      map[string]Org{},
+		members:   map[string]Membership{},
 	}
+}
+
+func (s *MemoryStore) CreateOrg(_ context.Context, org Org) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	org.CreatedAt = time.Now()
+	s.orgs[org.ID] = org
+	return nil
+}
+
+func (s *MemoryStore) AddMember(_ context.Context, m Membership) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := m.OrgID + "/" + m.UserID
+	if old, ok := s.members[key]; ok {
+		m.CreatedAt = old.CreatedAt
+	} else {
+		m.CreatedAt = time.Now()
+	}
+	s.members[key] = m
+	return nil
+}
+
+func (s *MemoryStore) MembershipsForUser(_ context.Context, userID string) ([]Membership, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Membership
+	for _, m := range s.members {
+		if m.UserID == userID {
+			m.OrgName = s.orgs[m.OrgID].Name
+			out = append(out, m)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	return out, nil
+}
+
+func (s *MemoryStore) ClaimUnownedMerchants(_ context.Context, orgID string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for id, m := range s.merchants {
+		if m.OrgID == "" {
+			m.OrgID = orgID
+			s.merchants[id] = m
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (s *MemoryStore) MerchantsByOrg(_ context.Context, orgID string) ([]Merchant, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Merchant
+	for _, m := range s.merchants {
+		if m.OrgID == orgID {
+			out = append(out, m)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+func (s *MemoryStore) InvoicesForMerchants(_ context.Context, merchantIDs []string, since time.Time, limit int) ([]Invoice, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	want := map[string]bool{}
+	for _, id := range merchantIDs {
+		want[id] = true
+	}
+	var out []Invoice
+	for _, inv := range s.invoices {
+		if want[inv.MerchantID] && !inv.CreatedAt.Before(since) {
+			out = append(out, inv)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 func (s *MemoryStore) ClaimTransaction(_ context.Context, txID, ref string) (string, error) {
@@ -57,6 +143,10 @@ func (s *MemoryStore) SaveMerchant(_ context.Context, m Merchant) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m.UpdatedAt = time.Now()
+	// seperti Postgres: menyimpan ulang merchant tidak mengubah pemilik (org)
+	if old, ok := s.merchants[m.ID]; ok && m.OrgID == "" {
+		m.OrgID = old.OrgID
+	}
 	s.merchants[m.ID] = m
 	return nil
 }
