@@ -192,6 +192,7 @@ type Store interface {
 	MembershipsForUser(ctx context.Context, userID string) ([]Membership, error)
 	// ClaimUnownedMerchants assigns every merchant without an org to orgID.
 	ClaimUnownedMerchants(ctx context.Context, orgID string) (int, error)
+	// MerchantsByOrg lists the org's merchants without their Shopee session.
 	MerchantsByOrg(ctx context.Context, orgID string) ([]Merchant, error)
 	// InvoicesForMerchants returns invoices of the merchants created since, newest first.
 	InvoicesForMerchants(ctx context.Context, merchantIDs []string, since time.Time, limit int) ([]Invoice, error)

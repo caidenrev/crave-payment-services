@@ -581,8 +581,12 @@ func (s *PostgresStore) ClaimUnownedMerchants(ctx context.Context, orgID string)
 	return int(n), nil
 }
 
+// merchantColsNoSession sama dengan merchantCols tanpa sesi Shopee: daftar untuk
+// console tidak butuh (dan tidak boleh gagal karena) dekripsi sesi.
+const merchantColsNoSession = `id, name, shopee_merchant_id, store_id, static_qris, null::bytea, status, coalesce(org_id,''), updated_at`
+
 func (s *PostgresStore) MerchantsByOrg(ctx context.Context, orgID string) ([]Merchant, error) {
-	rows, err := s.db.QueryContext(ctx, `select `+merchantCols+` from gateway_merchants where org_id = $1 order by name`, orgID)
+	rows, err := s.db.QueryContext(ctx, `select `+merchantColsNoSession+` from gateway_merchants where org_id = $1 order by name`, orgID)
 	if err != nil {
 		return nil, err
 	}

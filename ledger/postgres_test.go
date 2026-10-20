@@ -187,7 +187,8 @@ func TestPostgresConsoleOrgs(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Millisecond)
 
 	for _, id := range []string{mA, mB} {
-		if err := st.SaveMerchant(ctx, Merchant{ID: id, Name: id, Status: MerchantConnected}); err != nil {
+		// dengan sesi: daftar console tidak boleh mendekripsinya
+		if err := st.SaveMerchant(ctx, Merchant{ID: id, Name: id, Status: MerchantConnected, SessionJSON: []byte(`{"rahasia":1}`)}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -218,8 +219,8 @@ func TestPostgresConsoleOrgs(t *testing.T) {
 	for _, m := range owned {
 		if m.ID == mA || m.ID == mB {
 			got = append(got, m.ID)
-			if m.OrgID != orgID {
-				t.Fatalf("merchant org: %+v", m)
+			if m.OrgID != orgID || m.SessionJSON != nil {
+				t.Fatalf("merchant org / session must not be loaded: %+v", m)
 			}
 		}
 	}

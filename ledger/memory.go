@@ -102,6 +102,7 @@ func (s *MemoryStore) MerchantsByOrg(_ context.Context, orgID string) ([]Merchan
 	var out []Merchant
 	for _, m := range s.merchants {
 		if m.OrgID == orgID {
+			m.SessionJSON = nil // seperti Postgres: daftar console tanpa sesi Shopee
 			out = append(out, m)
 		}
 	}
