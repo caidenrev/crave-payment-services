@@ -10,9 +10,13 @@ import (
 )
 
 // fakeInviter: email baru → user baru + email terkirim; "lama@uji.id" → akun sudah aktif.
-type fakeInviter struct{ sent []string }
+type fakeInviter struct {
+	sent []string
+	data []InviteData
+}
 
-func (f *fakeInviter) Invite(_ context.Context, email string) (string, bool, error) {
+func (f *fakeInviter) Invite(_ context.Context, email string, data InviteData) (string, bool, error) {
+	f.data = append(f.data, data)
 	if email == "penuh@uji.id" {
 		return "", false, errInviteRateLimited
 	}
@@ -55,6 +59,9 @@ func TestConsoleInviteAndJoin(t *testing.T) {
 	code, out, raw := e.consoleCall("POST", "tok-founder", "members", map[string]any{"email": " Dev@Uji.id ", "role": "developer"})
 	if code != http.StatusCreated || out["email_sent"] != true || len(inv.sent) != 1 || inv.sent[0] != "dev@uji.id" {
 		t.Fatalf("invite: %d %s", code, raw)
+	}
+	if d := inv.data[0]; d.OrgName != "Crave Services" || d.InvitedBy != founderEmail || d.RoleLabel != "Developer" {
+		t.Fatalf("invite email data: %+v", d)
 	}
 	_, list, _ := e.consoleCall("GET", "tok-founder", "members", nil)
 	if m := memberByEmail(t, list, "dev@uji.id"); m == nil || m["status"] != "invited" || m["role"] != "developer" || m["invited_by"] != founderEmail {

@@ -24,10 +24,21 @@ import (
 )
 
 // TeamInviter mengirim undangan login console. existing = akun sudah aktif
-// (tidak ada email terkirim; cukup masuk seperti biasa).
+// (tidak ada email terkirim; cukup masuk seperti biasa). data muncul di
+// template email Supabase sebagai {{ .Data.org_name }}, {{ .Data.invited_by }},
+// {{ .Data.role_label }}.
 type TeamInviter interface {
-	Invite(ctx context.Context, email string) (userID string, existing bool, err error)
+	Invite(ctx context.Context, email string, data InviteData) (userID string, existing bool, err error)
 }
+
+// InviteData mengisi teks email undangan.
+type InviteData struct {
+	OrgName   string `json:"org_name"`
+	InvitedBy string `json:"invited_by"`
+	RoleLabel string `json:"role_label"`
+}
+
+var roleLabels = map[string]string{ledger.RoleOwner: "Owner", ledger.RoleAdmin: "Admin", ledger.RoleDeveloper: "Developer", ledger.RoleViewer: "Viewer"}
 
 var errInviteRateLimited = errors.New("batas kirim email Supabase tercapai, coba lagi nanti")
 
@@ -57,8 +68,8 @@ func (si supabaseInviter) call(ctx context.Context, path string, body any) (int,
 	return resp.StatusCode, out, nil
 }
 
-func (si supabaseInviter) Invite(ctx context.Context, email string) (string, bool, error) {
-	code, out, err := si.call(ctx, "/auth/v1/invite", map[string]any{"email": email})
+func (si supabaseInviter) Invite(ctx context.Context, email string, data InviteData) (string, bool, error) {
+	code, out, err := si.call(ctx, "/auth/v1/invite", map[string]any{"email": email, "data": data})
 	if err != nil {
 		return "", false, err
 	}
@@ -225,7 +236,7 @@ func (s *Server) inviteMember(w http.ResponseWriter, r *http.Request, org ledger
 	}
 	ctx, cancel := detached(r, 20*time.Second)
 	defer cancel()
-	userID, existing, err := inv.Invite(ctx, email)
+	userID, existing, err := inv.Invite(ctx, email, InviteData{OrgName: org.OrgName, InvitedBy: user.Email, RoleLabel: roleLabels[req.Role]})
 	if err != nil {
 		status := http.StatusBadGateway
 		if errors.Is(err, errInviteRateLimited) {
@@ -319,7 +330,7 @@ func (s *Server) resendInvite(w http.ResponseWriter, r *http.Request, org ledger
 	}
 	ctx, cancel := detached(r, 20*time.Second)
 	defer cancel()
-	_, existing, err := inv.Invite(ctx, target.Email)
+	_, existing, err := inv.Invite(ctx, target.Email, InviteData{OrgName: org.OrgName, InvitedBy: target.InvitedBy, RoleLabel: roleLabels[target.Role]})
 	if err != nil {
 		status := http.StatusBadGateway
 		if errors.Is(err, errInviteRateLimited) {
