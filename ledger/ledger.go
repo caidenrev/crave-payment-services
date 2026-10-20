@@ -54,7 +54,34 @@ type App struct {
 	Name       string
 	MerchantID string
 	ClientKey  string
-	CreatedAt  time.Time
+	// WebhookURL menerima event tagihan; WebhookSecret (disimpan terenkripsi)
+	// menandatangani setiap kiriman. Keduanya kosong = webhook mati.
+	WebhookURL    string
+	WebhookSecret string
+	CreatedAt     time.Time
+}
+
+// Webhook event statuses.
+const (
+	EventPending   = "pending"
+	EventDelivered = "delivered"
+	EventFailed    = "failed"
+)
+
+// WebhookEvent is one notification queued for an app. (InvoiceID, Type) is
+// unique, so a transition observed by several callers is sent once.
+type WebhookEvent struct {
+	ID            string
+	AppID         string
+	InvoiceID     string
+	Type          string
+	Payload       []byte
+	Status        string
+	Attempts      int
+	NextAttemptAt time.Time
+	LastError     string
+	CreatedAt     time.Time
+	DeliveredAt   *time.Time
 }
 
 // Invoice is one QRIS bill.
@@ -117,6 +144,19 @@ type Store interface {
 	// GetCheckoutTheme returns a merchant's checkout theme JSON, or ErrNotFound.
 	GetCheckoutTheme(ctx context.Context, merchantID string) ([]byte, error)
 	SaveCheckoutTheme(ctx context.Context, merchantID string, theme []byte) error
+
+	// SetWebhook stores an app's webhook URL and signing secret ("" clears).
+	SetWebhook(ctx context.Context, appID, url, secret string) error
+	// EnqueueEvent stores ev; false when (InvoiceID, Type) was already queued.
+	EnqueueEvent(ctx context.Context, ev WebhookEvent) (bool, error)
+	// LeaseDueEvents returns pending events due at now and pushes their
+	// NextAttemptAt to now+lease, so overlapping sweeps never send one twice.
+	LeaseDueEvents(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]WebhookEvent, error)
+	// SaveEventAttempt records the outcome of a delivery attempt.
+	SaveEventAttempt(ctx context.Context, ev WebhookEvent) error
+	ListEvents(ctx context.Context, appID string, limit int) ([]WebhookEvent, error)
+	// SweepCandidates returns pending invoices not checked since staleBefore.
+	SweepCandidates(ctx context.Context, staleBefore time.Time, limit int) ([]Invoice, error)
 }
 
 // Window bounds which transactions may settle a bill.

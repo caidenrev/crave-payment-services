@@ -20,6 +20,7 @@ type MemoryStore struct {
 	tokens    map[string]memToken // tokenHash -> token
 	checked   map[string]time.Time
 	themes    map[string][]byte
+	events    map[string]WebhookEvent // id -> event
 }
 
 type memToken struct {
@@ -38,6 +39,7 @@ func NewMemoryStore() *MemoryStore {
 		tokens:    map[string]memToken{},
 		checked:   map[string]time.Time{},
 		themes:    map[string][]byte{},
+		events:    map[string]WebhookEvent{},
 	}
 }
 
@@ -241,6 +243,96 @@ func (s *MemoryStore) GetCheckoutTheme(_ context.Context, merchantID string) ([]
 		return nil, ErrNotFound
 	}
 	return append([]byte(nil), t...), nil
+}
+
+func (s *MemoryStore) SetWebhook(_ context.Context, appID, url, secret string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, ok := s.apps[appID]
+	if !ok {
+		return ErrNotFound
+	}
+	a.WebhookURL, a.WebhookSecret = url, secret
+	s.apps[appID] = a
+	return nil
+}
+
+func (s *MemoryStore) EnqueueEvent(_ context.Context, ev WebhookEvent) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, e := range s.events {
+		if e.InvoiceID == ev.InvoiceID && e.Type == ev.Type {
+			return false, nil
+		}
+	}
+	s.events[ev.ID] = ev
+	return true, nil
+}
+
+func (s *MemoryStore) LeaseDueEvents(_ context.Context, now time.Time, lease time.Duration, limit int) ([]WebhookEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var due []WebhookEvent
+	for _, e := range s.events {
+		if e.Status == EventPending && !e.NextAttemptAt.After(now) {
+			due = append(due, e)
+		}
+	}
+	sort.Slice(due, func(i, j int) bool { return due[i].NextAttemptAt.Before(due[j].NextAttemptAt) })
+	if len(due) > limit {
+		due = due[:limit]
+	}
+	for i := range due {
+		due[i].NextAttemptAt = now.Add(lease)
+		s.events[due[i].ID] = due[i]
+	}
+	return due, nil
+}
+
+func (s *MemoryStore) SaveEventAttempt(_ context.Context, ev WebhookEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.events[ev.ID]; !ok {
+		return ErrNotFound
+	}
+	s.events[ev.ID] = ev
+	return nil
+}
+
+func (s *MemoryStore) ListEvents(_ context.Context, appID string, limit int) ([]WebhookEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []WebhookEvent
+	for _, e := range s.events {
+		if e.AppID == appID {
+			out = append(out, e)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) SweepCandidates(_ context.Context, staleBefore time.Time, limit int) ([]Invoice, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Invoice
+	for _, inv := range s.invoices {
+		if inv.Status != StatusPending {
+			continue
+		}
+		if last, ok := s.checked[inv.ID]; ok && !last.Before(staleBefore) {
+			continue
+		}
+		out = append(out, inv)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 func (s *MemoryStore) SaveCheckoutTheme(_ context.Context, merchantID string, theme []byte) error {
