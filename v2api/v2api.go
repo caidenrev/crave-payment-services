@@ -19,6 +19,10 @@
 //	POST /api/v2/admin/apps/{id}/webhook/test   → kirim event "ping"
 //	GET  /api/v2/admin/apps/{id}/webhook/events
 //
+// Console (Authorization: Bearer <token login Supabase>), lihat console.go:
+//
+//	GET  /api/v2/console/me | merchants | apps | invoices
+//
 // Cron (Authorization: Bearer $CRON_SECRET), dipanggil tiap menit oleh cron-job.org:
 //
 //	POST /api/v2/internal/sweep
@@ -79,6 +83,13 @@ type Server struct {
 	Webhooks HTTPDoer
 	// AllowInsecureWebhooks mengizinkan URL http/localhost (hanya untuk tes).
 	AllowInsecureWebhooks bool
+	// SupabaseURL + SupabaseAnonKey (publik) memverifikasi login console.
+	SupabaseURL     string
+	SupabaseAnonKey string
+	// BootstrapEmail mendapat org pertama otomatis saat pertama membuka console.
+	BootstrapEmail string
+	// ConsoleAuth mengganti verifikasi Supabase (untuk tes); nil = Supabase.
+	ConsoleAuth func(ctx context.Context, token string) (ConsoleUser, error)
 }
 
 type providerClient struct{ p *shopee.Provider }
@@ -119,6 +130,9 @@ func Handle(w http.ResponseWriter, r *http.Request) {
 		CheckoutBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("CHECKOUT_BASE_URL")), "/"),
 		CronSecret:      strings.TrimSpace(os.Getenv("CRON_SECRET")),
 		Webhooks:        defaultWebhookClient,
+		SupabaseURL:     strings.TrimRight(strings.TrimSpace(os.Getenv("SUPABASE_URL")), "/"),
+		SupabaseAnonKey: strings.TrimSpace(os.Getenv("SUPABASE_ANON_KEY")),
+		BootstrapEmail:  strings.TrimSpace(os.Getenv("CONSOLE_BOOTSTRAP_EMAIL")),
 	}
 	s.ServeHTTP(w, r)
 }
@@ -137,6 +151,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.routeAdmin(w, r, parts[1:])
+
+	case parts[0] == "console":
+		s.routeConsole(w, r, parts[1:])
 
 	case parts[0] == "internal":
 		if len(parts) != 2 || parts[1] != "sweep" || r.Method != http.MethodPost {

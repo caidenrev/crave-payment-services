@@ -88,6 +88,22 @@ create table if not exists gateway_webhook_events (
 );
 create index if not exists gateway_webhook_events_due on gateway_webhook_events (next_attempt_at) where status = 'pending';
 create index if not exists gateway_invoices_sweep on gateway_invoices (created_at) where status = 'pending';
+create table if not exists gateway_orgs (
+  id text primary key,
+  name text not null,
+  created_at timestamptz not null default now()
+);
+create table if not exists gateway_org_members (
+  org_id text not null references gateway_orgs(id) on delete cascade,
+  user_id text not null,
+  email text not null default '',
+  role text not null,
+  created_at timestamptz not null default now(),
+  primary key (org_id, user_id)
+);
+create index if not exists gateway_org_members_user on gateway_org_members (user_id);
+alter table gateway_merchants add column if not exists org_id text references gateway_orgs(id);
+create index if not exists gateway_invoices_merchant_created on gateway_invoices (merchant_id, created_at desc);
 `
 
 // PostgresStore persists state in Postgres; sessions are encrypted with Cipher.
@@ -195,7 +211,7 @@ type rowScanner interface{ Scan(dest ...any) error }
 func (s *PostgresStore) scanMerchant(row rowScanner) (Merchant, error) {
 	var m Merchant
 	var enc []byte
-	err := row.Scan(&m.ID, &m.Name, &m.ShopeeMerchantID, &m.StoreID, &m.StaticQris, &enc, &m.Status, &m.UpdatedAt)
+	err := row.Scan(&m.ID, &m.Name, &m.ShopeeMerchantID, &m.StoreID, &m.StaticQris, &enc, &m.Status, &m.OrgID, &m.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return m, ErrNotFound
 	}
@@ -212,7 +228,7 @@ func (s *PostgresStore) scanMerchant(row rowScanner) (Merchant, error) {
 	return m, nil
 }
 
-const merchantCols = `id, name, shopee_merchant_id, store_id, static_qris, session_enc, status, updated_at`
+const merchantCols = `id, name, shopee_merchant_id, store_id, static_qris, session_enc, status, coalesce(org_id,''), updated_at`
 
 func (s *PostgresStore) GetMerchant(ctx context.Context, id string) (Merchant, error) {
 	return s.scanMerchant(s.db.QueryRowContext(ctx, `select `+merchantCols+` from gateway_merchants where id = $1`, id))
@@ -511,6 +527,95 @@ func (s *PostgresStore) SweepCandidates(ctx context.Context, staleBefore time.Ti
 	rows, err := s.db.QueryContext(ctx, `select `+invoiceCols+` from gateway_invoices
 		where status = 'pending' and (last_checked_at is null or last_checked_at < $1)
 		order by created_at limit $2`, staleBefore, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Invoice
+	for rows.Next() {
+		inv, err := scanInvoice(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, inv)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) CreateOrg(ctx context.Context, org Org) error {
+	_, err := s.db.ExecContext(ctx, `insert into gateway_orgs (id, name) values ($1,$2)`, org.ID, org.Name)
+	return err
+}
+
+func (s *PostgresStore) AddMember(ctx context.Context, m Membership) error {
+	_, err := s.db.ExecContext(ctx, `insert into gateway_org_members (org_id, user_id, email, role) values ($1,$2,$3,$4)
+		on conflict (org_id, user_id) do update set email = excluded.email, role = excluded.role`, m.OrgID, m.UserID, m.Email, m.Role)
+	return err
+}
+
+func (s *PostgresStore) MembershipsForUser(ctx context.Context, userID string) ([]Membership, error) {
+	rows, err := s.db.QueryContext(ctx, `select m.org_id, o.name, m.user_id, m.email, m.role, m.created_at
+		from gateway_org_members m join gateway_orgs o on o.id = m.org_id
+		where m.user_id = $1 order by m.created_at`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Membership
+	for rows.Next() {
+		var m Membership
+		if err := rows.Scan(&m.OrgID, &m.OrgName, &m.UserID, &m.Email, &m.Role, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) ClaimUnownedMerchants(ctx context.Context, orgID string) (int, error) {
+	res, err := s.db.ExecContext(ctx, `update gateway_merchants set org_id = $1 where org_id is null`, orgID)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// merchantColsNoSession sama dengan merchantCols tanpa sesi Shopee: daftar untuk
+// console tidak butuh (dan tidak boleh gagal karena) dekripsi sesi.
+const merchantColsNoSession = `id, name, shopee_merchant_id, store_id, static_qris, null::bytea, status, coalesce(org_id,''), updated_at`
+
+func (s *PostgresStore) MerchantsByOrg(ctx context.Context, orgID string) ([]Merchant, error) {
+	rows, err := s.db.QueryContext(ctx, `select `+merchantColsNoSession+` from gateway_merchants where org_id = $1 order by name`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Merchant
+	for rows.Next() {
+		m, err := s.scanMerchant(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) InvoicesForMerchants(ctx context.Context, merchantIDs []string, since time.Time, limit int) ([]Invoice, error) {
+	if len(merchantIDs) == 0 {
+		return nil, nil
+	}
+	// placeholder eksplisit ($3, $4, …) supaya tidak bergantung pada encoding array
+	args := []any{since, limit}
+	ph := make([]string, len(merchantIDs))
+	for i, id := range merchantIDs {
+		args = append(args, id)
+		ph[i] = fmt.Sprintf("$%d", i+3)
+	}
+	rows, err := s.db.QueryContext(ctx, `select `+invoiceCols+` from gateway_invoices
+		where merchant_id in (`+strings.Join(ph, ",")+`) and created_at >= $1
+		order by created_at desc limit $2`, args...)
 	if err != nil {
 		return nil, err
 	}
