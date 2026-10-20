@@ -138,11 +138,12 @@ func TestPostgresCheckout(t *testing.T) {
 		t.Fatalf("webhook roundtrip: %+v %v", a, err)
 	}
 
-	// sweep: tagihan yang baru dicek dilewati, yang lama diambil
-	if c, err := st.SweepCandidates(ctx, now.Add(time.Second), 100); err != nil || !containsInvoice(c, invID) {
+	// sweep: TryMarkChecked terakhir di atas mencatat now+3s. Batas sesudahnya
+	// mengambil tagihan; batas sebelumnya melewatinya.
+	if c, err := st.SweepCandidates(ctx, now.Add(time.Minute), 100); err != nil || !containsInvoice(c, invID) {
 		t.Fatalf("stale invoice must be a sweep candidate: %v", err)
 	}
-	if c, _ := st.SweepCandidates(ctx, now.Add(-time.Minute), 100); containsInvoice(c, invID) {
+	if c, _ := st.SweepCandidates(ctx, now.Add(2*time.Second), 100); containsInvoice(c, invID) {
 		t.Fatal("recently checked invoice must be skipped")
 	}
 
