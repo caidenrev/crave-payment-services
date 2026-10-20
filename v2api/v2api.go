@@ -14,6 +14,14 @@
 //	POST /api/v2/admin/apps/{id}/client-key     → new client_key
 //	GET  /api/v2/admin/merchants/{id}/checkout-theme
 //	PUT  /api/v2/admin/merchants/{id}/checkout-theme
+//	PUT  /api/v2/admin/apps/{id}/webhook        {url} → webhook_secret (lihat webhook.go)
+//	POST /api/v2/admin/apps/{id}/webhook/secret → secret baru
+//	POST /api/v2/admin/apps/{id}/webhook/test   → kirim event "ping"
+//	GET  /api/v2/admin/apps/{id}/webhook/events
+//
+// Cron (Authorization: Bearer $CRON_SECRET), dipanggil tiap menit oleh cron-job.org:
+//
+//	POST /api/v2/internal/sweep
 //
 // App routes (Authorization: Bearer <api_key>, call from a server, never a browser):
 //
@@ -65,6 +73,12 @@ type Server struct {
 	// CheckoutBaseURL membentuk redirect_url (mis. https://pay.craveservices.my.id);
 	// kosong = redirect_url tidak dikirim.
 	CheckoutBaseURL string
+	// CronSecret melindungi POST /api/v2/internal/sweep; kosong = sweep mati.
+	CronSecret string
+	// Webhooks mengirim HTTP ke server toko (bisa diganti di tes).
+	Webhooks HTTPDoer
+	// AllowInsecureWebhooks mengizinkan URL http/localhost (hanya untuk tes).
+	AllowInsecureWebhooks bool
 }
 
 type providerClient struct{ p *shopee.Provider }
@@ -88,8 +102,13 @@ func newProviderClient(sess *shopee.Session) ShopeeClient {
 
 // Handle serves /api/v2 using the ledger configured by environment variables.
 func Handle(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	timeout := 8 * time.Second
+	if strings.HasSuffix(strings.TrimSuffix(r.URL.Path, "/"), "/internal/sweep") {
+		timeout = sweepBudget + 5*time.Second
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
+	r = r.WithContext(ctx)
 	st, err := ledger.FromEnv(ctx)
 	if err != nil {
 		writeErr(w, http.StatusServiceUnavailable, "NOT_CONFIGURED", "API v2 belum dikonfigurasi: "+err.Error())
@@ -98,6 +117,8 @@ func Handle(w http.ResponseWriter, r *http.Request) {
 	s := &Server{
 		Store: st, AdminToken: strings.TrimSpace(os.Getenv("ADMIN_TOKEN")), NewClient: newProviderClient, Now: time.Now,
 		CheckoutBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("CHECKOUT_BASE_URL")), "/"),
+		CronSecret:      strings.TrimSpace(os.Getenv("CRON_SECRET")),
+		Webhooks:        defaultWebhookClient,
 	}
 	s.ServeHTTP(w, r)
 }
@@ -116,6 +137,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.routeAdmin(w, r, parts[1:])
+
+	case parts[0] == "internal":
+		if len(parts) != 2 || parts[1] != "sweep" || r.Method != http.MethodPost {
+			writeErr(w, http.StatusNotFound, "NOT_FOUND", "Endpoint tidak ditemukan")
+			return
+		}
+		s.sweep(w, r)
 
 	case parts[0] == "checkout":
 		if len(parts) != 2 || parts[1] == "" || r.Method != http.MethodGet {
@@ -201,6 +229,14 @@ func (s *Server) routeAdmin(w http.ResponseWriter, r *http.Request, parts []stri
 		s.createApp(w, r)
 	case len(parts) == 3 && parts[0] == "apps" && parts[2] == "client-key" && r.Method == http.MethodPost:
 		s.rollClientKey(w, r, parts[1])
+	case len(parts) == 3 && parts[0] == "apps" && parts[2] == "webhook" && r.Method == http.MethodPut:
+		s.putWebhook(w, r, parts[1])
+	case len(parts) == 4 && parts[0] == "apps" && parts[2] == "webhook" && parts[3] == "secret" && r.Method == http.MethodPost:
+		s.rotateWebhookSecret(w, r, parts[1])
+	case len(parts) == 4 && parts[0] == "apps" && parts[2] == "webhook" && parts[3] == "test" && r.Method == http.MethodPost:
+		s.testWebhook(w, r, parts[1])
+	case len(parts) == 4 && parts[0] == "apps" && parts[2] == "webhook" && parts[3] == "events" && r.Method == http.MethodGet:
+		s.listWebhookEvents(w, r, parts[1])
 	case len(parts) == 3 && parts[0] == "merchants" && parts[2] == "checkout-theme" && r.Method == http.MethodGet:
 		s.getCheckoutTheme(w, r, parts[1])
 	case len(parts) == 3 && parts[0] == "merchants" && parts[2] == "checkout-theme" && r.Method == http.MethodPut:
@@ -386,7 +422,10 @@ func (s *Server) listApps(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]map[string]any, 0, len(apps))
 	for _, a := range apps {
-		out = append(out, map[string]any{"id": a.ID, "name": a.Name, "merchant_id": a.MerchantID, "client_key": a.ClientKey, "created_at": a.CreatedAt})
+		out = append(out, map[string]any{
+			"id": a.ID, "name": a.Name, "merchant_id": a.MerchantID, "client_key": a.ClientKey,
+			"webhook_url": a.WebhookURL, "created_at": a.CreatedAt,
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"apps": out})
 }
@@ -558,15 +597,53 @@ type gatewayError struct{ code string }
 
 func (e *gatewayError) Error() string { return e.code }
 
-// reconcile reads the merchant feed (renewing the Shopee session if needed,
-// under the merchant lock so concurrent polls never race on cookies) and
-// settles the invoice through the claim ledger.
+// reconcile reads the merchant feed and settles the invoice through the claim
+// ledger, then queues a webhook if the invoice changed status.
 func (s *Server) reconcile(ctx context.Context, inv ledger.Invoice) (ledger.Invoice, error) {
+	feed, err := s.merchantFeed(ctx, inv.MerchantID, inv.CreatedAt.Add(-time.Minute))
+	return s.settleWith(ctx, inv, feed, err)
+}
+
+// settleWith applies an already-fetched feed (or feed error) to one invoice and
+// notifies the app when it moved from pending to paid/expired.
+func (s *Server) settleWith(ctx context.Context, inv ledger.Invoice, feed []core.MerchantTransaction, feedErr error) (ledger.Invoice, error) {
+	var gw *gatewayError
+	if feedErr != nil && !errors.As(feedErr, &gw) {
+		return inv, feedErr
+	}
+	now := s.Now().UTC()
+	var out ledger.Invoice
+	var err error
+	if feedErr != nil {
+		// tetap boleh kedaluwarsa walau Shopee tidak bisa dihubungi
+		if !now.After(inv.ExpiresAt.Add(2 * time.Minute)) {
+			return inv, feedErr
+		}
+		if _, err := s.Store.MarkExpired(ctx, inv.ID); err != nil {
+			return inv, err
+		}
+		out, err = s.Store.GetInvoice(ctx, inv.AppID, inv.ID)
+	} else {
+		out, err = ledger.Settle(ctx, s.Store, inv, feed, now)
+	}
+	if err != nil {
+		return inv, err
+	}
+	if inv.Status == ledger.StatusPending && out.Status != ledger.StatusPending {
+		s.notifyTransition(ctx, out)
+	}
+	return out, nil
+}
+
+// merchantFeed reads the merchant's recent transactions since start (renewing
+// the Shopee session if needed, under the merchant lock so concurrent polls
+// never race on cookies). Feed problems come back as *gatewayError.
+func (s *Server) merchantFeed(ctx context.Context, merchantID string, start time.Time) ([]core.MerchantTransaction, error) {
 	now := s.Now().UTC()
 	var feed []core.MerchantTransaction
 	var feedErr error
 
-	err := s.Store.WithMerchantLock(ctx, inv.MerchantID, func(m *ledger.Merchant) error {
+	err := s.Store.WithMerchantLock(ctx, merchantID, func(m *ledger.Merchant) error {
 		if m.Status != ledger.MerchantConnected {
 			feedErr = &gatewayError{"MERCHANT_DISCONNECTED"}
 			return nil
@@ -577,7 +654,7 @@ func (s *Server) reconcile(ctx context.Context, inv ledger.Invoice) (ledger.Invo
 			return nil
 		}
 		client := s.NewClient(&sess)
-		start, end := inv.CreatedAt.Add(-time.Minute), now.Add(time.Minute)
+		end := now.Add(time.Minute)
 
 		txs, err := client.Recent(ctx, start, end)
 		if err != nil {
@@ -602,19 +679,12 @@ func (s *Server) reconcile(ctx context.Context, inv ledger.Invoice) (ledger.Invo
 		return nil
 	})
 	if err != nil {
-		return inv, err
+		return nil, err
 	}
 	if feedErr != nil {
-		// tetap boleh kedaluwarsa walau Shopee tidak bisa dihubungi
-		if now.After(inv.ExpiresAt.Add(2 * time.Minute)) {
-			if _, err := s.Store.MarkExpired(ctx, inv.ID); err != nil {
-				return inv, err
-			}
-			return s.Store.GetInvoice(ctx, inv.AppID, inv.ID)
-		}
-		return inv, feedErr
+		return nil, feedErr
 	}
-	return ledger.Settle(ctx, s.Store, inv, feed, now)
+	return feed, nil
 }
 
 /* ------------------------------------------------------------- helpers */

@@ -40,6 +40,7 @@ func openTestPostgres(t *testing.T) (*PostgresStore, string) {
 	t.Cleanup(func() {
 		ctx := context.Background()
 		for _, q := range []string{
+			`delete from gateway_webhook_events where app_id like '%' || $1`,
 			`delete from gateway_checkout_tokens where invoice_id like '%' || $1`,
 			`delete from gateway_invoices where id like '%' || $1`,
 			`delete from gateway_checkout_themes where merchant_id like '%' || $1`,
@@ -123,4 +124,71 @@ func TestPostgresCheckout(t *testing.T) {
 	if raw, err := st.GetCheckoutTheme(ctx, mID); err != nil || !strings.Contains(string(raw), "#EA580C") {
 		t.Fatalf("theme upsert: %s %v", raw, err)
 	}
+
+	// webhook: secret disimpan terenkripsi lalu terbaca utuh
+	if err := st.SetWebhook(ctx, appID, "https://toko.id/hook", "whsec_"+sfx); err != nil {
+		t.Fatal(err)
+	}
+	var rawSecret []byte
+	if err := st.db.QueryRowContext(ctx, `select webhook_secret_enc from gateway_apps where id = $1`, appID).Scan(&rawSecret); err != nil ||
+		strings.Contains(string(rawSecret), "whsec_") {
+		t.Fatalf("webhook secret must be encrypted at rest: %v", err)
+	}
+	if a, err := st.AppByID(ctx, appID); err != nil || a.WebhookURL != "https://toko.id/hook" || a.WebhookSecret != "whsec_"+sfx {
+		t.Fatalf("webhook roundtrip: %+v %v", a, err)
+	}
+
+	// sweep: tagihan yang baru dicek dilewati, yang lama diambil
+	if c, err := st.SweepCandidates(ctx, now.Add(time.Second), 100); err != nil || !containsInvoice(c, invID) {
+		t.Fatalf("stale invoice must be a sweep candidate: %v", err)
+	}
+	if c, _ := st.SweepCandidates(ctx, now.Add(-time.Minute), 100); containsInvoice(c, invID) {
+		t.Fatal("recently checked invoice must be skipped")
+	}
+
+	// antrean event: unik per (tagihan, jenis), lease, simpan hasil
+	ev := WebhookEvent{ID: "evt_" + sfx, AppID: appID, InvoiceID: invID, Type: "invoice.paid", Payload: []byte(`{"a":1}`),
+		Status: EventPending, NextAttemptAt: now, CreatedAt: now}
+	if ok, err := st.EnqueueEvent(ctx, ev); err != nil || !ok {
+		t.Fatalf("enqueue: %v %v", ok, err)
+	}
+	dup := ev
+	dup.ID = "evt_dup_" + sfx
+	if ok, err := st.EnqueueEvent(ctx, dup); err != nil || ok {
+		t.Fatalf("duplicate (invoice,type) must be ignored: %v %v", ok, err)
+	}
+	leased, err := st.LeaseDueEvents(ctx, now, time.Minute, 100)
+	if err != nil || !containsEvent(leased, ev.ID) {
+		t.Fatalf("lease: %v", err)
+	}
+	if again, _ := st.LeaseDueEvents(ctx, now, time.Minute, 100); containsEvent(again, ev.ID) {
+		t.Fatal("leased event must not be leased twice")
+	}
+	delivered := now.Add(time.Second)
+	ev.Status, ev.Attempts, ev.DeliveredAt = EventDelivered, 1, &delivered
+	if err := st.SaveEventAttempt(ctx, ev); err != nil {
+		t.Fatal(err)
+	}
+	list, err := st.ListEvents(ctx, appID, 10)
+	if err != nil || len(list) != 1 || list[0].Status != EventDelivered || list[0].DeliveredAt == nil || string(list[0].Payload) != `{"a": 1}` {
+		t.Fatalf("list events: %+v %v", list, err)
+	}
+}
+
+func containsInvoice(list []Invoice, id string) bool {
+	for _, x := range list {
+		if x.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func containsEvent(list []WebhookEvent, id string) bool {
+	for _, x := range list {
+		if x.ID == id {
+			return true
+		}
+	}
+	return false
 }

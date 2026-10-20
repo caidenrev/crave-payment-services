@@ -70,6 +70,24 @@ create table if not exists gateway_checkout_themes (
   theme jsonb not null,
   updated_at timestamptz not null default now()
 );
+alter table gateway_apps add column if not exists webhook_url text;
+alter table gateway_apps add column if not exists webhook_secret_enc bytea;
+create table if not exists gateway_webhook_events (
+  id text primary key,
+  app_id text not null references gateway_apps(id) on delete cascade,
+  invoice_id text not null,
+  type text not null,
+  payload jsonb not null,
+  status text not null default 'pending',
+  attempts int not null default 0,
+  next_attempt_at timestamptz not null,
+  last_error text not null default '',
+  created_at timestamptz not null default now(),
+  delivered_at timestamptz,
+  unique (invoice_id, type)
+);
+create index if not exists gateway_webhook_events_due on gateway_webhook_events (next_attempt_at) where status = 'pending';
+create index if not exists gateway_invoices_sweep on gateway_invoices (created_at) where status = 'pending';
 `
 
 // PostgresStore persists state in Postgres; sessions are encrypted with Cipher.
@@ -248,23 +266,34 @@ func (s *PostgresStore) CreateApp(ctx context.Context, app App, keyHash string) 
 	return err
 }
 
-const appCols = `id, name, merchant_id, coalesce(client_key,''), created_at`
+const appCols = `id, name, merchant_id, coalesce(client_key,''), coalesce(webhook_url,''), webhook_secret_enc, created_at`
 
-func scanApp(row rowScanner) (App, error) {
+func (s *PostgresStore) scanApp(row rowScanner) (App, error) {
 	var a App
-	err := row.Scan(&a.ID, &a.Name, &a.MerchantID, &a.ClientKey, &a.CreatedAt)
+	var secretEnc []byte
+	err := row.Scan(&a.ID, &a.Name, &a.MerchantID, &a.ClientKey, &a.WebhookURL, &secretEnc, &a.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return a, ErrNotFound
 	}
-	return a, err
+	if err != nil {
+		return a, err
+	}
+	if len(secretEnc) > 0 {
+		plain, err := s.cipher.Open(secretEnc)
+		if err != nil {
+			return a, fmt.Errorf("decrypt webhook secret for %s: %w", a.ID, err)
+		}
+		a.WebhookSecret = string(plain)
+	}
+	return a, nil
 }
 
 func (s *PostgresStore) AppByKeyHash(ctx context.Context, keyHash string) (App, error) {
-	return scanApp(s.db.QueryRowContext(ctx, `select `+appCols+` from gateway_apps where key_hash = $1`, keyHash))
+	return s.scanApp(s.db.QueryRowContext(ctx, `select `+appCols+` from gateway_apps where key_hash = $1`, keyHash))
 }
 
 func (s *PostgresStore) AppByID(ctx context.Context, id string) (App, error) {
-	return scanApp(s.db.QueryRowContext(ctx, `select `+appCols+` from gateway_apps where id = $1`, id))
+	return s.scanApp(s.db.QueryRowContext(ctx, `select `+appCols+` from gateway_apps where id = $1`, id))
 }
 
 func (s *PostgresStore) ListApps(ctx context.Context) ([]App, error) {
@@ -275,7 +304,7 @@ func (s *PostgresStore) ListApps(ctx context.Context) ([]App, error) {
 	defer rows.Close()
 	var out []App
 	for rows.Next() {
-		a, err := scanApp(rows)
+		a, err := s.scanApp(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -381,6 +410,120 @@ func (s *PostgresStore) GetCheckoutTheme(ctx context.Context, merchantID string)
 		return nil, ErrNotFound
 	}
 	return []byte(theme), err
+}
+
+func (s *PostgresStore) SetWebhook(ctx context.Context, appID, url, secret string) error {
+	var enc []byte
+	if secret != "" {
+		var err error
+		if enc, err = s.cipher.Seal([]byte(secret)); err != nil {
+			return err
+		}
+	}
+	res, err := s.db.ExecContext(ctx, `update gateway_apps set webhook_url = nullif($2,''), webhook_secret_enc = $3 where id = $1`, appID, url, enc)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+const eventCols = `id, app_id, invoice_id, type, payload::text, status, attempts, next_attempt_at, last_error, created_at, delivered_at`
+
+func scanEvent(row rowScanner) (WebhookEvent, error) {
+	var ev WebhookEvent
+	var payload string
+	var delivered sql.NullTime
+	err := row.Scan(&ev.ID, &ev.AppID, &ev.InvoiceID, &ev.Type, &payload, &ev.Status, &ev.Attempts,
+		&ev.NextAttemptAt, &ev.LastError, &ev.CreatedAt, &delivered)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ev, ErrNotFound
+	}
+	ev.Payload = []byte(payload)
+	if delivered.Valid {
+		t := delivered.Time
+		ev.DeliveredAt = &t
+	}
+	return ev, err
+}
+
+func scanEvents(rows *sql.Rows) ([]WebhookEvent, error) {
+	defer rows.Close()
+	var out []WebhookEvent
+	for rows.Next() {
+		ev, err := scanEvent(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ev)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) EnqueueEvent(ctx context.Context, ev WebhookEvent) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `
+		insert into gateway_webhook_events (id, app_id, invoice_id, type, payload, status, next_attempt_at, created_at)
+		values ($1,$2,$3,$4,$5::jsonb,$6,$7,$8)
+		on conflict (invoice_id, type) do nothing`,
+		ev.ID, ev.AppID, ev.InvoiceID, ev.Type, string(ev.Payload), ev.Status, ev.NextAttemptAt, ev.CreatedAt)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
+}
+
+func (s *PostgresStore) LeaseDueEvents(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]WebhookEvent, error) {
+	// skip locked: dua sweep yang tumpang tindih mengambil event yang berbeda.
+	rows, err := s.db.QueryContext(ctx, `
+		update gateway_webhook_events set next_attempt_at = $2
+		where id in (
+		  select id from gateway_webhook_events
+		  where status = 'pending' and next_attempt_at <= $1
+		  order by next_attempt_at limit $3
+		  for update skip locked)
+		returning `+eventCols, now, now.Add(lease), limit)
+	if err != nil {
+		return nil, err
+	}
+	return scanEvents(rows)
+}
+
+func (s *PostgresStore) SaveEventAttempt(ctx context.Context, ev WebhookEvent) error {
+	_, err := s.db.ExecContext(ctx, `update gateway_webhook_events
+		set status = $2, attempts = $3, next_attempt_at = $4, last_error = $5, delivered_at = $6 where id = $1`,
+		ev.ID, ev.Status, ev.Attempts, ev.NextAttemptAt, ev.LastError, ev.DeliveredAt)
+	return err
+}
+
+func (s *PostgresStore) ListEvents(ctx context.Context, appID string, limit int) ([]WebhookEvent, error) {
+	rows, err := s.db.QueryContext(ctx, `select `+eventCols+` from gateway_webhook_events
+		where app_id = $1 order by created_at desc limit $2`, appID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return scanEvents(rows)
+}
+
+func (s *PostgresStore) SweepCandidates(ctx context.Context, staleBefore time.Time, limit int) ([]Invoice, error) {
+	rows, err := s.db.QueryContext(ctx, `select `+invoiceCols+` from gateway_invoices
+		where status = 'pending' and (last_checked_at is null or last_checked_at < $1)
+		order by created_at limit $2`, staleBefore, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Invoice
+	for rows.Next() {
+		inv, err := scanInvoice(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, inv)
+	}
+	return out, rows.Err()
 }
 
 func (s *PostgresStore) SaveCheckoutTheme(ctx context.Context, merchantID string, theme []byte) error {
