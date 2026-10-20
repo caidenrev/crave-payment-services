@@ -104,6 +104,18 @@ create table if not exists gateway_org_members (
 create index if not exists gateway_org_members_user on gateway_org_members (user_id);
 alter table gateway_merchants add column if not exists org_id text references gateway_orgs(id);
 create index if not exists gateway_invoices_merchant_created on gateway_invoices (merchant_id, created_at desc);
+alter table gateway_apps add column if not exists deleted_at timestamptz;
+create table if not exists gateway_otp_sessions (
+  id text primary key,
+  org_id text not null,
+  user_id text not null,
+  kind text not null,
+  data_enc bytea not null,
+  expires_at timestamptz not null,
+  used_at timestamptz,
+  created_at timestamptz not null default now()
+);
+create index if not exists gateway_otp_sessions_user on gateway_otp_sessions (user_id, created_at);
 `
 
 // PostgresStore persists state in Postgres; sessions are encrypted with Cipher.
@@ -305,15 +317,15 @@ func (s *PostgresStore) scanApp(row rowScanner) (App, error) {
 }
 
 func (s *PostgresStore) AppByKeyHash(ctx context.Context, keyHash string) (App, error) {
-	return s.scanApp(s.db.QueryRowContext(ctx, `select `+appCols+` from gateway_apps where key_hash = $1`, keyHash))
+	return s.scanApp(s.db.QueryRowContext(ctx, `select `+appCols+` from gateway_apps where key_hash = $1 and deleted_at is null`, keyHash))
 }
 
 func (s *PostgresStore) AppByID(ctx context.Context, id string) (App, error) {
-	return s.scanApp(s.db.QueryRowContext(ctx, `select `+appCols+` from gateway_apps where id = $1`, id))
+	return s.scanApp(s.db.QueryRowContext(ctx, `select `+appCols+` from gateway_apps where id = $1 and deleted_at is null`, id))
 }
 
 func (s *PostgresStore) ListApps(ctx context.Context) ([]App, error) {
-	rows, err := s.db.QueryContext(ctx, `select `+appCols+` from gateway_apps order by created_at`)
+	rows, err := s.db.QueryContext(ctx, `select `+appCols+` from gateway_apps where deleted_at is null order by created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -629,6 +641,81 @@ func (s *PostgresStore) InvoicesForMerchants(ctx context.Context, merchantIDs []
 		out = append(out, inv)
 	}
 	return out, rows.Err()
+}
+
+func (s *PostgresStore) SetMerchantOrg(ctx context.Context, merchantID, orgID string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `update gateway_merchants set org_id = $2 where id = $1 and (org_id is null or org_id = $2)`, merchantID, orgID)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
+}
+
+// execOne runs an update on a live (not deleted) app; ErrNotFound when none matched.
+func (s *PostgresStore) execOne(ctx context.Context, q string, args ...any) error {
+	res, err := s.db.ExecContext(ctx, q, args...)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) SetKeyHash(ctx context.Context, appID, keyHash string) error {
+	return s.execOne(ctx, `update gateway_apps set key_hash = $2 where id = $1 and deleted_at is null`, appID, keyHash)
+}
+
+func (s *PostgresStore) RenameApp(ctx context.Context, appID, name string) error {
+	return s.execOne(ctx, `update gateway_apps set name = $2 where id = $1 and deleted_at is null`, appID, name)
+}
+
+func (s *PostgresStore) DeleteApp(ctx context.Context, appID string) error {
+	// key_hash wajib unik & tidak null: ganti dengan penanda yang tidak cocok dengan key mana pun
+	return s.execOne(ctx, `update gateway_apps set deleted_at = now(), key_hash = 'deleted:' || id,
+		client_key = null, webhook_url = null, webhook_secret_enc = null
+		where id = $1 and deleted_at is null`, appID)
+}
+
+func (s *PostgresStore) SaveOtpSession(ctx context.Context, o OtpSession) error {
+	enc, err := s.cipher.Seal(o.Data)
+	if err != nil {
+		return err
+	}
+	// bersihkan sisa lama (lebih dari sehari) sambil lalu
+	_, _ = s.db.ExecContext(ctx, `delete from gateway_otp_sessions where created_at < now() - interval '1 day'`)
+	_, err = s.db.ExecContext(ctx, `insert into gateway_otp_sessions (id, org_id, user_id, kind, data_enc, expires_at) values ($1,$2,$3,$4,$5,$6)`,
+		o.ID, o.OrgID, o.UserID, o.Kind, enc, o.ExpiresAt)
+	return err
+}
+
+func (s *PostgresStore) TakeOtpSession(ctx context.Context, id, orgID, userID string, now time.Time) (OtpSession, error) {
+	// update … returning dalam satu statement: sesi hanya bisa dipakai sekali.
+	// Baris tetap disimpan (ditandai used_at) supaya batas permintaan OTP tetap terhitung.
+	var o OtpSession
+	var enc []byte
+	err := s.db.QueryRowContext(ctx, `update gateway_otp_sessions set used_at = $4
+		where id = $1 and org_id = $2 and user_id = $3 and expires_at > $4 and used_at is null
+		returning id, org_id, user_id, kind, data_enc, expires_at, created_at`, id, orgID, userID, now).
+		Scan(&o.ID, &o.OrgID, &o.UserID, &o.Kind, &enc, &o.ExpiresAt, &o.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return o, ErrNotFound
+	}
+	if err != nil {
+		return o, err
+	}
+	if o.Data, err = s.cipher.Open(enc); err != nil {
+		return o, fmt.Errorf("decrypt otp session: %w", err)
+	}
+	return o, nil
+}
+
+func (s *PostgresStore) CountOtpSessions(ctx context.Context, userID string, since time.Time) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `select count(*) from gateway_otp_sessions where user_id = $1 and kind = 'challenge' and created_at >= $2`, userID, since).Scan(&n)
+	return n, err
 }
 
 func (s *PostgresStore) SaveCheckoutTheme(ctx context.Context, merchantID string, theme []byte) error {
