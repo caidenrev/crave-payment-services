@@ -19,6 +19,7 @@ package v2api
 // memegang ID sekali pakai. Password Shopee dan OTP tidak disimpan.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -60,6 +61,15 @@ type verificationState struct {
 	Attempts     int                    `json:"attempts"`
 }
 
+// shopeeCallTimeout membatasi satu langkah login Shopee. Batas fungsi Vercel 60 detik.
+const shopeeCallTimeout = 45 * time.Second
+
+// detached membuat context yang tidak ikut tenggat request dari platform
+// (Shopee bisa lambat dari region iad1), tapi tetap dibatasi d.
+func detached(r *http.Request, d time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(r.Context()), d)
+}
+
 // saveOtp menyimpan state login terenkripsi dan mengembalikan ID sekali pakai.
 func (s *Server) saveOtp(r *http.Request, org ledger.Membership, user ConsoleUser, kind string, v any) (string, error) {
 	raw, err := json.Marshal(v)
@@ -70,7 +80,10 @@ func (s *Server) saveOtp(r *http.Request, org ledger.Membership, user ConsoleUse
 	if err != nil {
 		return "", err
 	}
-	return id, s.Store.SaveOtpSession(r.Context(), ledger.OtpSession{
+	// Tetap tersimpan walau tenggat request sudah lewat, supaya pengguna bisa mencoba lagi.
+	ctx, cancel := detached(r, 5*time.Second)
+	defer cancel()
+	return id, s.Store.SaveOtpSession(ctx, ledger.OtpSession{
 		ID: id, OrgID: org.OrgID, UserID: user.ID, Kind: kind, Data: raw, ExpiresAt: s.Now().UTC().Add(otpSessionTTL),
 	})
 }
@@ -128,7 +141,9 @@ func (s *Server) consoleOtpRequest(w http.ResponseWriter, r *http.Request, org l
 		writeErr(w, http.StatusTooManyRequests, "TOO_MANY_REQUESTS", "Terlalu banyak permintaan kode OTP. Coba lagi 15 menit lagi.")
 		return
 	}
-	ch, err := s.shopeeLogin().RequestOtp(r.Context(), strings.TrimSpace(req.Phone), req.Password, req.Channel)
+	sctx, scancel := detached(r, shopeeCallTimeout)
+	defer scancel()
+	ch, err := s.shopeeLogin().RequestOtp(sctx, strings.TrimSpace(req.Phone), req.Password, req.Channel)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "OTP_FAILED", err.Error())
 		return
@@ -167,7 +182,9 @@ func (s *Server) consoleOtpVerify(w http.ResponseWriter, r *http.Request, org le
 	if !s.takeOtp(w, r, org, user, req.ChallengeID, otpKindChallenge, &st) {
 		return
 	}
-	verif, err := s.shopeeLogin().VerifyOtp(r.Context(), st.Challenge, strings.TrimSpace(req.OTP))
+	sctx, scancel := detached(r, shopeeCallTimeout)
+	defer scancel()
+	verif, err := s.shopeeLogin().VerifyOtp(sctx, st.Challenge, strings.TrimSpace(req.OTP))
 	if err == nil && verif == nil {
 		err = errors.New("verifikasi OTP tidak mengembalikan data")
 	}
@@ -224,7 +241,9 @@ func (s *Server) consoleOtpComplete(w http.ResponseWriter, r *http.Request, org 
 	if !s.takeOtp(w, r, org, user, req.VerificationID, otpKindVerification, &st) {
 		return
 	}
-	sess, err := s.shopeeLogin().Complete(r.Context(), st.Verification, strings.TrimSpace(req.MerchantID), strings.TrimSpace(req.StoreID))
+	sctx, scancel := detached(r, shopeeCallTimeout)
+	defer scancel()
+	sess, err := s.shopeeLogin().Complete(sctx, st.Verification, strings.TrimSpace(req.MerchantID), strings.TrimSpace(req.StoreID))
 	if err != nil {
 		// OTP sudah diterima; gangguan di tahap ini (mis. Shopee lambat) bisa
 		// dicoba lagi tanpa meminta OTP baru (maks. 3x).
@@ -247,7 +266,9 @@ func (s *Server) consoleOtpComplete(w http.ResponseWriter, r *http.Request, org 
 }
 
 func (s *Server) finishConnect(w http.ResponseWriter, r *http.Request, org ledger.Membership, sess *shopee.Session, staticQris string) {
-	m, apiErr := s.persistMerchant(r.Context(), sess, staticQris, org.OrgID)
+	pctx, pcancel := detached(r, 10*time.Second)
+	defer pcancel()
+	m, apiErr := s.persistMerchant(pctx, sess, staticQris, org.OrgID)
 	if apiErr != nil {
 		apiErr.write(w)
 		return
