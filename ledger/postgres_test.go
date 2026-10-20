@@ -42,6 +42,7 @@ func openTestPostgres(t *testing.T) (*PostgresStore, string) {
 		for _, q := range []string{
 			// klaim merchant di tes ikut mengenai salinan merchant lain di branch: kembalikan dulu
 			`update gateway_merchants set org_id = null where org_id like '%' || $1`,
+			`delete from gateway_otp_sessions where id like '%' || $1`,
 			`delete from gateway_org_members where org_id like '%' || $1`,
 			`delete from gateway_orgs where id like '%' || $1`,
 			`delete from gateway_webhook_events where app_id like '%' || $1`,
@@ -248,6 +249,87 @@ func TestPostgresConsoleOrgs(t *testing.T) {
 	}
 	if none, err := st.InvoicesForMerchants(ctx, nil, now.Add(-time.Hour), 10); err != nil || len(none) != 0 {
 		t.Fatalf("no merchants: %v %v", none, err)
+	}
+}
+
+func TestPostgresConsoleManage(t *testing.T) {
+	st, sfx := openTestPostgres(t)
+	ctx := context.Background()
+	orgA, orgB, mID, appID := "org_a_"+sfx, "org_b_"+sfx, "mch_"+sfx, "app_"+sfx
+	now := time.Now().UTC()
+
+	for _, o := range []string{orgA, orgB} {
+		if err := st.CreateOrg(ctx, Org{ID: o, Name: o}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.SaveMerchant(ctx, Merchant{ID: mID, Name: "Uji", Status: MerchantConnected}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := st.SetMerchantOrg(ctx, mID, orgA); err != nil || !ok {
+		t.Fatalf("claim unowned: %v %v", ok, err)
+	}
+	if ok, _ := st.SetMerchantOrg(ctx, mID, orgB); ok {
+		t.Fatal("merchant owned by another org must not be taken")
+	}
+	if ok, _ := st.SetMerchantOrg(ctx, mID, orgA); !ok {
+		t.Fatal("re-claim by the owner is fine")
+	}
+
+	if err := st.CreateApp(ctx, App{ID: appID, Name: "Uji", MerchantID: mID, ClientKey: "pgk_pub_" + sfx}, "hash1_"+sfx); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetKeyHash(ctx, appID, "hash2_"+sfx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AppByKeyHash(ctx, "hash1_"+sfx); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("old key must stop working: %v", err)
+	}
+	if err := st.RenameApp(ctx, appID, "Baru"); err != nil {
+		t.Fatal(err)
+	}
+	if a, err := st.AppByKeyHash(ctx, "hash2_"+sfx); err != nil || a.Name != "Baru" {
+		t.Fatalf("new key + rename: %+v %v", a, err)
+	}
+	if err := st.DeleteApp(ctx, appID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AppByID(ctx, appID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleted app must be invisible: %v", err)
+	}
+	if _, err := st.AppByKeyHash(ctx, "hash2_"+sfx); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleted app key must stop working: %v", err)
+	}
+	if err := st.DeleteApp(ctx, appID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("delete twice: %v", err)
+	}
+
+	// sesi OTP: terenkripsi, sekali pakai, milik org+user, tetap dihitung untuk batas
+	otp := OtpSession{ID: "otp_" + sfx, OrgID: orgA, UserID: "u_" + sfx, Kind: "challenge", Data: []byte(`{"cookie":"rahasia"}`), ExpiresAt: now.Add(10 * time.Minute)}
+	if err := st.SaveOtpSession(ctx, otp); err != nil {
+		t.Fatal(err)
+	}
+	var raw []byte
+	if err := st.db.QueryRowContext(ctx, `select data_enc from gateway_otp_sessions where id = $1`, otp.ID).Scan(&raw); err != nil || strings.Contains(string(raw), "rahasia") {
+		t.Fatalf("otp data must be encrypted at rest: %v", err)
+	}
+	if _, err := st.TakeOtpSession(ctx, otp.ID, orgB, otp.UserID, now); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("other org must not take it: %v", err)
+	}
+	got, err := st.TakeOtpSession(ctx, otp.ID, orgA, otp.UserID, now)
+	if err != nil || string(got.Data) != `{"cookie":"rahasia"}` {
+		t.Fatalf("take: %+v %v", got, err)
+	}
+	if _, err := st.TakeOtpSession(ctx, otp.ID, orgA, otp.UserID, now); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("single use: %v", err)
+	}
+	if n, err := st.CountOtpSessions(ctx, otp.UserID, now.Add(-time.Hour)); err != nil || n != 1 {
+		t.Fatalf("used session still counts for the rate limit: %d %v", n, err)
+	}
+	expired := OtpSession{ID: "otp_x_" + sfx, OrgID: orgA, UserID: otp.UserID, Kind: "challenge", Data: []byte("{}"), ExpiresAt: now.Add(-time.Minute)}
+	_ = st.SaveOtpSession(ctx, expired)
+	if _, err := st.TakeOtpSession(ctx, expired.ID, orgA, otp.UserID, now); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expired session: %v", err)
 	}
 }
 

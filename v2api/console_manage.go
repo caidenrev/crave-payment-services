@@ -39,7 +39,9 @@ const (
 	otpKindVerification = "verification"
 )
 
-func canManageMerchants(role string) bool { return role == ledger.RoleOwner || role == ledger.RoleAdmin }
+func canManageMerchants(role string) bool {
+	return role == ledger.RoleOwner || role == ledger.RoleAdmin
+}
 
 func canManageApps(role string) bool { return canManageMerchants(role) || role == ledger.RoleDeveloper }
 
