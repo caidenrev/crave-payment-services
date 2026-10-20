@@ -92,6 +92,10 @@ type Server struct {
 	ConsoleAuth func(ctx context.Context, token string) (ConsoleUser, error)
 	// Login mengganti login OTP Shopee (untuk tes); nil = Shopee sungguhan.
 	Login ShopeeLogin
+	// SupabaseServiceKey (rahasia) dipakai hanya untuk mengirim undangan anggota tim.
+	SupabaseServiceKey string
+	// Inviter mengganti pengirim undangan Supabase (untuk tes); nil = Supabase.
+	Inviter TeamInviter
 }
 
 type providerClient struct{ p *shopee.Provider }
@@ -135,6 +139,8 @@ func Handle(w http.ResponseWriter, r *http.Request) {
 		SupabaseURL:     strings.TrimRight(strings.TrimSpace(os.Getenv("SUPABASE_URL")), "/"),
 		SupabaseAnonKey: strings.TrimSpace(os.Getenv("SUPABASE_ANON_KEY")),
 		BootstrapEmail:  strings.TrimSpace(os.Getenv("CONSOLE_BOOTSTRAP_EMAIL")),
+
+		SupabaseServiceKey: strings.TrimSpace(os.Getenv("SUPABASE_SERVICE_ROLE_KEY")),
 	}
 	s.ServeHTTP(w, r)
 }

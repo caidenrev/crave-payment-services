@@ -134,8 +134,18 @@ func (s *Server) consoleUser(w http.ResponseWriter, r *http.Request) (ConsoleUse
 // memberships mengembalikan org pengguna; founder tanpa org dibuatkan org pertama.
 func (s *Server) memberships(ctx context.Context, user ConsoleUser) ([]ledger.Membership, error) {
 	ms, err := s.Store.MembershipsForUser(ctx, user.ID)
-	if err != nil || len(ms) > 0 {
-		return ms, err
+	if err != nil {
+		return nil, err
+	}
+	if len(ms) > 0 {
+		// kunjungan pertama setelah diundang: tandai sudah bergabung
+		for _, m := range ms {
+			if m.JoinedAt.IsZero() {
+				_ = s.Store.MarkJoined(ctx, user.ID, s.Now().UTC())
+				break
+			}
+		}
+		return ms, nil
 	}
 	if s.BootstrapEmail == "" || !strings.EqualFold(user.Email, s.BootstrapEmail) {
 		return nil, nil
@@ -144,7 +154,7 @@ func (s *Server) memberships(ctx context.Context, user ConsoleUser) ([]ledger.Me
 	if err := s.Store.CreateOrg(ctx, org); err != nil {
 		return nil, err
 	}
-	if err := s.Store.AddMember(ctx, ledger.Membership{OrgID: org.ID, UserID: user.ID, Email: user.Email, Role: ledger.RoleOwner}); err != nil {
+	if err := s.Store.AddMember(ctx, ledger.Membership{OrgID: org.ID, UserID: user.ID, Email: user.Email, Role: ledger.RoleOwner, JoinedAt: s.Now().UTC()}); err != nil {
 		return nil, err
 	}
 	if _, err := s.Store.ClaimUnownedMerchants(ctx, org.ID); err != nil {
@@ -213,6 +223,10 @@ func (s *Server) routeConsole(w http.ResponseWriter, r *http.Request, parts []st
 		default:
 			notFound()
 		}
+	// anggota tim (console_team.go)
+	case n >= 1 && parts[0] == "members":
+		s.routeMembers(w, r, org, user, parts[1:])
+
 	case m == http.MethodPut && n == 3 && parts[0] == "merchants" && parts[2] == "static-qris":
 		s.consoleSetStaticQris(w, r, org, parts[1])
 	case m == http.MethodPost && n == 3 && parts[0] == "merchants" && parts[2] == "disconnect":

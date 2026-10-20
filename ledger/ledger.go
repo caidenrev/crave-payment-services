@@ -71,6 +71,10 @@ type Membership struct {
 	Email     string
 	Role      string
 	CreatedAt time.Time
+	// InvitedBy is the email of the member who sent the invite ("" for the founder).
+	InvitedBy string
+	// JoinedAt is when the user first opened the console as a member; zero = invited, not joined yet.
+	JoinedAt time.Time
 }
 
 // App is a client application (a SaaS) allowed to bill through one merchant.
@@ -190,6 +194,14 @@ type Store interface {
 	AddMember(ctx context.Context, m Membership) error
 	// MembershipsForUser returns the user's orgs (with OrgName), oldest first.
 	MembershipsForUser(ctx context.Context, userID string) ([]Membership, error)
+	// MembersOfOrg lists an org's members, oldest first.
+	MembersOfOrg(ctx context.Context, orgID string) ([]Membership, error)
+	// SetMemberRole changes a member's role; ErrNotFound when not a member.
+	SetMemberRole(ctx context.Context, orgID, userID, role string) error
+	// RemoveMember removes a user from an org; ErrNotFound when not a member.
+	RemoveMember(ctx context.Context, orgID, userID string) error
+	// MarkJoined records the first console visit of the user in every org they were invited to.
+	MarkJoined(ctx context.Context, userID string, at time.Time) error
 	// ClaimUnownedMerchants assigns every merchant without an org to orgID.
 	ClaimUnownedMerchants(ctx context.Context, orgID string) (int, error)
 	// MerchantsByOrg lists the org's merchants without their Shopee session.
