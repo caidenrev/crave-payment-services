@@ -66,6 +66,18 @@ func (s *MemoryStore) SetMerchantOrg(_ context.Context, merchantID, orgID string
 	return true, nil
 }
 
+func (s *MemoryStore) ReleaseMerchant(_ context.Context, merchantID, orgID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, ok := s.merchants[merchantID]
+	if !ok || m.OrgID != orgID {
+		return false, nil
+	}
+	m.OrgID, m.SessionJSON, m.Status = "", nil, MerchantDisconnected
+	s.merchants[merchantID] = m
+	return true, nil
+}
+
 func (s *MemoryStore) SetKeyHash(_ context.Context, appID, keyHash string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

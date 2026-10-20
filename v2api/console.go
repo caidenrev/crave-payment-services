@@ -215,6 +215,10 @@ func (s *Server) routeConsole(w http.ResponseWriter, r *http.Request, parts []st
 		}
 	case m == http.MethodPut && n == 3 && parts[0] == "merchants" && parts[2] == "static-qris":
 		s.consoleSetStaticQris(w, r, org, parts[1])
+	case m == http.MethodPost && n == 3 && parts[0] == "merchants" && parts[2] == "disconnect":
+		s.consoleDisconnectMerchant(w, r, org, parts[1])
+	case m == http.MethodDelete && n == 2 && parts[0] == "merchants":
+		s.consoleReleaseMerchant(w, r, org, parts[1])
 
 	// kelola aplikasi & API key
 	case m == http.MethodPost && n == 1 && parts[0] == "apps":

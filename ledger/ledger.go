@@ -199,6 +199,9 @@ type Store interface {
 
 	// SetMerchantOrg gives an unowned merchant to orgID; false when another org owns it.
 	SetMerchantOrg(ctx context.Context, merchantID, orgID string) (bool, error)
+	// ReleaseMerchant removes a merchant from orgID: its Shopee session is wiped,
+	// it becomes disconnected and unowned. False when orgID does not own it.
+	ReleaseMerchant(ctx context.Context, merchantID, orgID string) (bool, error)
 	// SetKeyHash replaces an app's secret key (the old key stops working at once).
 	SetKeyHash(ctx context.Context, appID, keyHash string) error
 	RenameApp(ctx context.Context, appID, name string) error

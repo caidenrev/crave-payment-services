@@ -275,6 +275,19 @@ func TestPostgresConsoleManage(t *testing.T) {
 	if ok, _ := st.SetMerchantOrg(ctx, mID, orgA); !ok {
 		t.Fatal("re-claim by the owner is fine")
 	}
+	// lepas merchant: hanya pemilik, sesi dihapus, lalu bisa diklaim ulang
+	if ok, _ := st.ReleaseMerchant(ctx, mID, orgB); ok {
+		t.Fatal("another org must not release the merchant")
+	}
+	if ok, err := st.ReleaseMerchant(ctx, mID, orgA); err != nil || !ok {
+		t.Fatalf("release: %v %v", ok, err)
+	}
+	if m, _ := st.GetMerchant(ctx, mID); m.OrgID != "" || m.Status != MerchantDisconnected || len(m.SessionJSON) != 0 {
+		t.Fatalf("after release: %+v", m)
+	}
+	if ok, _ := st.SetMerchantOrg(ctx, mID, orgA); !ok {
+		t.Fatal("released merchant can be claimed again")
+	}
 
 	if err := st.CreateApp(ctx, App{ID: appID, Name: "Uji", MerchantID: mID, ClientKey: "pgk_pub_" + sfx}, "hash1_"+sfx); err != nil {
 		t.Fatal(err)
