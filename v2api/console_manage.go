@@ -374,7 +374,20 @@ func (s *Server) consoleCreateApp(w http.ResponseWriter, r *http.Request, org le
 	if !decode(w, r, &req) {
 		return
 	}
+	// aplikasi test tanpa merchant: pakai merchant sandbox org
+	if req.MerchantID == "" && req.Mode == ledger.ModeTest {
+		id, apiErr := s.sandboxMerchant(r.Context(), org)
+		if apiErr != nil {
+			apiErr.write(w)
+			return
+		}
+		req.MerchantID = id
+	}
 	if _, ok := s.orgMerchant(w, r, org, req.MerchantID); !ok {
+		return
+	}
+	if isSandbox(req.MerchantID) && req.Mode != ledger.ModeTest {
+		writeErr(w, http.StatusBadRequest, "SANDBOX_TEST_ONLY", "Merchant sandbox hanya untuk aplikasi mode test")
 		return
 	}
 	app, key, apiErr := s.newApp(r.Context(), req.Name, req.MerchantID, req.Mode)

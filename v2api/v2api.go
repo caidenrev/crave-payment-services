@@ -399,6 +399,7 @@ func merchantView(m ledger.Merchant) map[string]any {
 	return map[string]any{
 		"id": m.ID, "name": m.Name, "shopee_merchant_id": m.ShopeeMerchantID, "store_id": m.StoreID,
 		"status": m.Status, "static_qris_set": m.StaticQris != "", "updated_at": m.UpdatedAt,
+		"sandbox": isSandbox(m.ID),
 	}
 }
 
