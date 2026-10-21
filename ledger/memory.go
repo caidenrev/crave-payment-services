@@ -549,6 +549,16 @@ func (s *MemoryStore) SaveEventAttempt(_ context.Context, ev WebhookEvent) error
 	return nil
 }
 
+func (s *MemoryStore) GetEvent(_ context.Context, appID, id string) (WebhookEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ev, ok := s.events[id]
+	if !ok || ev.AppID != appID {
+		return WebhookEvent{}, ErrNotFound
+	}
+	return ev, nil
+}
+
 func (s *MemoryStore) ListEvents(_ context.Context, appID string, limit int) ([]WebhookEvent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

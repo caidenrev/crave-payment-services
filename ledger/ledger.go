@@ -116,6 +116,10 @@ type WebhookEvent struct {
 	LastError     string
 	CreatedAt     time.Time
 	DeliveredAt   *time.Time
+	// LastStatus is the HTTP status of the last attempt (0 = no response).
+	LastStatus int
+	// LastAttemptAt is when the event was last sent (zero = never).
+	LastAttemptAt time.Time
 }
 
 // Invoice is one QRIS bill.
@@ -205,6 +209,8 @@ type Store interface {
 	// SaveEventAttempt records the outcome of a delivery attempt.
 	SaveEventAttempt(ctx context.Context, ev WebhookEvent) error
 	ListEvents(ctx context.Context, appID string, limit int) ([]WebhookEvent, error)
+	// GetEvent returns one event of appID, or ErrNotFound.
+	GetEvent(ctx context.Context, appID, id string) (WebhookEvent, error)
 	// SweepCandidates returns pending invoices not checked since staleBefore.
 	SweepCandidates(ctx context.Context, staleBefore time.Time, limit int) ([]Invoice, error)
 

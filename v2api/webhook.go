@@ -153,18 +153,39 @@ func (s *Server) postWebhook(ctx context.Context, app ledger.App, evID, evType s
 	return resp.StatusCode, nil
 }
 
+// send mengirim ev sekali (tanpa menyimpan); kode HTTP 0 = tidak ada respons.
+func (s *Server) send(ctx context.Context, app ledger.App, ev ledger.WebhookEvent, timeout time.Duration) (int, error) {
+	if app.WebhookURL == "" || app.WebhookSecret == "" {
+		return 0, errors.New("webhook aplikasi sudah dimatikan")
+	}
+	sendCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return s.postWebhook(sendCtx, app, ev.ID, ev.Type, ev.Payload)
+}
+
+// resendNow: kirim ulang manual dari console. Berhasil = terkirim; gagal hanya
+// dicatat (status & jadwal percobaan otomatis tidak diubah).
+func (s *Server) resendNow(ctx context.Context, app ledger.App, ev ledger.WebhookEvent) (ledger.WebhookEvent, error) {
+	now := s.Now().UTC()
+	code, err := s.send(ctx, app, ev, inlineTimeout)
+	ev.Attempts++
+	ev.LastAttemptAt, ev.LastStatus = now, code
+	if err == nil {
+		ev.Status, ev.LastError, ev.DeliveredAt = ledger.EventDelivered, "", &now
+	} else {
+		ev.LastError = truncate(err.Error(), 300)
+	}
+	_ = s.Store.SaveEventAttempt(ctx, ev)
+	return ev, err
+}
+
 // attempt mengirim ev sekali dan menyimpan hasilnya (terkirim, dijadwalkan ulang, atau gagal).
 func (s *Server) attempt(ctx context.Context, app ledger.App, ev ledger.WebhookEvent, timeout time.Duration) ledger.WebhookEvent {
 	now := s.Now().UTC()
 	ev.Attempts++
+	ev.LastAttemptAt = now
 	var err error
-	if app.WebhookURL == "" || app.WebhookSecret == "" {
-		err = errors.New("webhook aplikasi sudah dimatikan")
-	} else {
-		sendCtx, cancel := context.WithTimeout(ctx, timeout)
-		_, err = s.postWebhook(sendCtx, app, ev.ID, ev.Type, ev.Payload)
-		cancel()
-	}
+	ev.LastStatus, err = s.send(ctx, app, ev, timeout)
 	switch {
 	case err == nil:
 		ev.Status, ev.LastError, ev.DeliveredAt = ledger.EventDelivered, "", &now
@@ -412,6 +433,29 @@ func (s *Server) listWebhookEvents(w http.ResponseWriter, r *http.Request, appID
 	if _, ok := s.appOr404(w, r, appID); !ok {
 		return
 	}
+	s.writeWebhookEvents(w, r, appID)
+}
+
+func eventView(ev ledger.WebhookEvent) map[string]any {
+	item := map[string]any{
+		"id": ev.ID, "type": ev.Type, "invoice_id": ev.InvoiceID, "status": ev.Status,
+		"attempts": ev.Attempts, "last_error": ev.LastError, "last_status": ev.LastStatus, "created_at": ev.CreatedAt,
+		"payload": json.RawMessage(ev.Payload),
+	}
+	if ev.Status == ledger.EventPending {
+		item["next_attempt_at"] = ev.NextAttemptAt
+	}
+	if ev.DeliveredAt != nil {
+		item["delivered_at"] = *ev.DeliveredAt
+	}
+	if !ev.LastAttemptAt.IsZero() {
+		item["last_attempt_at"] = ev.LastAttemptAt
+	}
+	return item
+}
+
+// writeWebhookEvents: 50 event terbaru aplikasi (dipakai admin dan console).
+func (s *Server) writeWebhookEvents(w http.ResponseWriter, r *http.Request, appID string) {
 	evs, err := s.Store.ListEvents(r.Context(), appID, 50)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "STORE_ERROR", "Gagal membaca event")
@@ -419,17 +463,28 @@ func (s *Server) listWebhookEvents(w http.ResponseWriter, r *http.Request, appID
 	}
 	out := make([]map[string]any, 0, len(evs))
 	for _, ev := range evs {
-		item := map[string]any{
-			"id": ev.ID, "type": ev.Type, "invoice_id": ev.InvoiceID, "status": ev.Status,
-			"attempts": ev.Attempts, "last_error": ev.LastError, "created_at": ev.CreatedAt,
-		}
-		if ev.Status == ledger.EventPending {
-			item["next_attempt_at"] = ev.NextAttemptAt
-		}
-		if ev.DeliveredAt != nil {
-			item["delivered_at"] = *ev.DeliveredAt
-		}
-		out = append(out, item)
+		out = append(out, eventView(ev))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"events": out})
+}
+
+// resendWebhookEvent: POST .../webhook/events/{id}/resend (console).
+func (s *Server) resendWebhookEvent(w http.ResponseWriter, r *http.Request, app ledger.App, eventID string) {
+	ev, err := s.Store.GetEvent(r.Context(), app.ID, eventID)
+	if errors.Is(err, ledger.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "NOT_FOUND", "Event tidak ditemukan")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "STORE_ERROR", "Gagal membaca event")
+		return
+	}
+	if app.WebhookURL == "" {
+		writeErr(w, http.StatusBadRequest, "WEBHOOK_NOT_SET", "URL webhook belum diatur")
+		return
+	}
+	out, sendErr := s.resendNow(r.Context(), app, ev)
+	view := eventView(out)
+	view["success"] = sendErr == nil
+	writeJSON(w, http.StatusOK, view)
 }
