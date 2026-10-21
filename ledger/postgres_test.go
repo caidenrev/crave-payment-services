@@ -74,8 +74,8 @@ func TestPostgresCheckout(t *testing.T) {
 		t.Fatal(err)
 	}
 	app, err := st.AppByID(ctx, appID)
-	if err != nil || app.ClientKey != "pgk_pub_"+sfx {
-		t.Fatalf("AppByID: %+v %v", app, err)
+	if err != nil || app.ClientKey != "pgk_pub_"+sfx || app.Mode != ModeLive {
+		t.Fatalf("AppByID (mode live bawaan): %+v %v", app, err)
 	}
 	if byKey, err := st.AppByKeyHash(ctx, "hash_"+sfx); err != nil || byKey.ClientKey != app.ClientKey {
 		t.Fatalf("AppByKeyHash must carry client key: %+v %v", byKey, err)
@@ -85,6 +85,22 @@ func TestPostgresCheckout(t *testing.T) {
 	}
 	if err := st.SetClientKey(ctx, "app_tidakada_"+sfx, "x"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("SetClientKey unknown app: %v", err)
+	}
+
+	// mode test tersimpan di aplikasi dan tagihan
+	testApp := "app_test_" + sfx
+	if err := st.CreateApp(ctx, App{ID: testApp, Name: "Sandbox", MerchantID: mID, Mode: ModeTest}, "hash_test_"+sfx); err != nil {
+		t.Fatal(err)
+	}
+	if a, err := st.AppByKeyHash(ctx, "hash_test_"+sfx); err != nil || a.Mode != ModeTest {
+		t.Fatalf("test app mode: %+v %v", a, err)
+	}
+	if _, _, err := st.CreateInvoice(ctx, Invoice{ID: "inv_test_" + sfx, AppID: testApp, MerchantID: mID, OrderID: "t", Amount: 500,
+		Status: StatusPending, QRString: "CRAVEPAY-TEST", CreatedAt: now, ExpiresAt: now.Add(time.Minute), Mode: ModeTest}); err != nil {
+		t.Fatal(err)
+	}
+	if ti, err := st.GetInvoice(ctx, testApp, "inv_test_"+sfx); err != nil || ti.Mode != ModeTest {
+		t.Fatalf("test invoice mode: %+v %v", ti, err)
 	}
 
 	inv, _, err := st.CreateInvoice(ctx, Invoice{
@@ -98,7 +114,7 @@ func TestPostgresCheckout(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := st.InvoiceByToken(ctx, "tok_"+sfx, now)
-	if err != nil || got.ID != invID {
+	if err != nil || got.ID != invID || got.Mode != ModeLive {
 		t.Fatalf("InvoiceByToken: %+v %v", got, err)
 	}
 	if _, err := st.InvoiceByToken(ctx, "tok_"+sfx, now.Add(2*time.Hour)); !errors.Is(err, ErrNotFound) {

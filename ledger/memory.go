@@ -353,6 +353,7 @@ func (s *MemoryStore) CreateApp(_ context.Context, app App, keyHash string) erro
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	app.CreatedAt = time.Now()
+	app.Mode = NormalizeMode(app.Mode)
 	s.apps[app.ID] = app
 	s.keys[keyHash] = app.ID
 	return nil
@@ -409,6 +410,7 @@ func (s *MemoryStore) CreateInvoice(_ context.Context, inv Invoice) (Invoice, bo
 			return existing, false, nil
 		}
 	}
+	inv.Mode = NormalizeMode(inv.Mode)
 	s.invoices[inv.ID] = inv
 	return inv, true, nil
 }

@@ -189,6 +189,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.createInvoice(w, r, app)
 		case len(parts) == 2 && parts[0] == "invoices" && r.Method == http.MethodGet:
 			s.getInvoice(w, r, app, parts[1])
+		case len(parts) == 3 && parts[0] == "invoices" && parts[2] == "simulate" && r.Method == http.MethodPost:
+			s.simulateInvoice(w, r, app, parts[1])
 		default:
 			writeErr(w, http.StatusNotFound, "NOT_FOUND", "Endpoint tidak ditemukan")
 		}
@@ -431,7 +433,7 @@ func (s *Server) listApps(w http.ResponseWriter, r *http.Request) {
 	for _, a := range apps {
 		out = append(out, map[string]any{
 			"id": a.ID, "name": a.Name, "merchant_id": a.MerchantID, "client_key": a.ClientKey,
-			"webhook_url": a.WebhookURL, "created_at": a.CreatedAt,
+			"webhook_url": a.WebhookURL, "created_at": a.CreatedAt, "mode": a.Mode,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"apps": out})
@@ -441,6 +443,7 @@ func (s *Server) createApp(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name       string `json:"name"`
 		MerchantID string `json:"merchant_id"`
+		Mode       string `json:"mode"`
 	}
 	if !decode(w, r, &req) {
 		return
@@ -449,7 +452,7 @@ func (s *Server) createApp(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "INVALID", "merchant_id tidak ditemukan")
 		return
 	}
-	app, key, apiErr := s.newApp(r.Context(), req.Name, req.MerchantID)
+	app, key, apiErr := s.newApp(r.Context(), req.Name, req.MerchantID, req.Mode)
 	if apiErr != nil {
 		apiErr.write(w)
 		return
@@ -465,21 +468,25 @@ func newSecretKey() (string, error) {
 	return "pgk_" + base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
-// newApp membuat aplikasi baru untuk merchant beserta secret key & client key.
-func (s *Server) newApp(ctx context.Context, name, merchantID string) (ledger.App, string, *apiError) {
+// newApp membuat aplikasi baru (live atau test) untuk merchant beserta secret key & client key.
+func (s *Server) newApp(ctx context.Context, name, merchantID, mode string) (ledger.App, string, *apiError) {
 	name = strings.TrimSpace(name)
 	if name == "" || len([]rune(name)) > 60 {
 		return ledger.App{}, "", &apiError{http.StatusBadRequest, "INVALID", "Nama aplikasi wajib diisi (maks. 60 karakter)"}
 	}
-	key, err := newSecretKey()
+	if mode != "" && mode != ledger.ModeLive && mode != ledger.ModeTest {
+		return ledger.App{}, "", &apiError{http.StatusBadRequest, "INVALID", "mode harus live atau test"}
+	}
+	mode = ledger.NormalizeMode(mode)
+	key, err := newSecretKeyFor(mode)
 	if err != nil {
 		return ledger.App{}, "", &apiError{http.StatusInternalServerError, "RANDOM", "Gagal membuat API key"}
 	}
-	clientKey, err := newClientKey()
+	clientKey, err := newClientKeyFor(mode)
 	if err != nil {
 		return ledger.App{}, "", &apiError{http.StatusInternalServerError, "RANDOM", "Gagal membuat client key"}
 	}
-	app := ledger.App{ID: "app_" + strings.TrimPrefix(utils.PaymentID(), "pay_"), Name: name, MerchantID: merchantID, ClientKey: clientKey}
+	app := ledger.App{ID: "app_" + strings.TrimPrefix(utils.PaymentID(), "pay_"), Name: name, MerchantID: merchantID, ClientKey: clientKey, Mode: mode}
 	if err := s.Store.CreateApp(ctx, app, hashKey(key)); err != nil {
 		return ledger.App{}, "", &apiError{http.StatusInternalServerError, "STORE_ERROR", "Gagal menyimpan aplikasi"}
 	}
@@ -488,7 +495,7 @@ func (s *Server) newApp(ctx context.Context, name, merchantID string) (ledger.Ap
 
 func newAppResponse(app ledger.App, key string) map[string]any {
 	return map[string]any{
-		"app": map[string]any{"id": app.ID, "name": app.Name, "merchant_id": app.MerchantID, "client_key": app.ClientKey},
+		"app": map[string]any{"id": app.ID, "name": app.Name, "merchant_id": app.MerchantID, "client_key": app.ClientKey, "mode": app.Mode},
 		// hanya ditampilkan sekali; gateway menyimpan hash-nya saja
 		"api_key": key,
 		// publik, boleh di browser; selalu bisa dilihat lagi
@@ -513,6 +520,7 @@ func invoiceView(inv ledger.Invoice) map[string]any {
 	out := map[string]any{
 		"id": inv.ID, "order_id": inv.OrderID, "amount": inv.Amount, "status": inv.Status,
 		"qris_string": inv.QRString, "created_at": inv.CreatedAt, "expires_at": inv.ExpiresAt,
+		"mode": ledger.NormalizeMode(inv.Mode),
 	}
 	if inv.PaidAt != nil {
 		out["paid_at"] = *inv.PaidAt
@@ -545,48 +553,59 @@ func (s *Server) createInvoice(w http.ResponseWriter, r *http.Request, app ledge
 		expiry = req.ExpiresInMinutes
 	}
 
-	m, err := s.Store.GetMerchant(r.Context(), app.MerchantID)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "STORE_ERROR", "Gagal membaca merchant")
+	view, created, apiErr := s.issueInvoice(r.Context(), app, req.OrderID, req.Amount, expiry)
+	if apiErr != nil {
+		apiErr.write(w)
 		return
 	}
-	if m.Status != ledger.MerchantConnected {
-		writeErr(w, http.StatusServiceUnavailable, "MERCHANT_DISCONNECTED", "Merchant terputus dari Shopee, admin perlu login OTP ulang")
-		return
-	}
-	if m.StaticQris == "" {
-		writeErr(w, http.StatusServiceUnavailable, "QRIS_NOT_SET", "QRIS statis merchant belum diatur")
-		return
-	}
-	dynamic, err := qris.StaticToDynamicQris(m.StaticQris, req.Amount)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "QRIS_ERROR", err.Error())
-		return
-	}
-	now := s.Now().UTC()
-	inv, created, err := s.Store.CreateInvoice(r.Context(), ledger.Invoice{
-		ID: "inv_" + strings.TrimPrefix(utils.PaymentID(), "pay_"), AppID: app.ID, MerchantID: m.ID,
-		OrderID: req.OrderID, Amount: req.Amount, Status: ledger.StatusPending, QRString: dynamic,
-		CreatedAt: now, ExpiresAt: now.Add(time.Duration(expiry) * time.Minute),
-	})
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "STORE_ERROR", "Gagal menyimpan tagihan")
-		return
-	}
-	if !created && inv.Amount != req.Amount {
-		writeErr(w, http.StatusConflict, "ORDER_EXISTS", "order_id sudah dipakai dengan nominal berbeda")
-		return
-	}
-	view := invoiceView(inv)
-	if code, err := qr.Encode(inv.QRString, qr.M); err == nil {
-		view["qris_image_base64"] = "data:image/png;base64," + base64.StdEncoding.EncodeToString(code.PNG())
-	}
-	s.addCheckout(r.Context(), view, inv, app)
 	status := http.StatusCreated
 	if !created {
 		status = http.StatusOK
 	}
 	writeJSON(w, status, view)
+}
+
+// issueInvoice membuat tagihan (atau mengembalikan yang sudah ada untuk
+// order_id yang sama) beserta gambar QR dan token checkout. Tagihan test
+// memakai QR palsu dan tidak butuh merchant terhubung / QRIS statis.
+func (s *Server) issueInvoice(ctx context.Context, app ledger.App, orderID string, amount int64, expiry int) (map[string]any, bool, *apiError) {
+	m, err := s.Store.GetMerchant(ctx, app.MerchantID)
+	if err != nil {
+		return nil, false, &apiError{http.StatusInternalServerError, "STORE_ERROR", "Gagal membaca merchant"}
+	}
+	id := "inv_" + strings.TrimPrefix(utils.PaymentID(), "pay_")
+	var qrString string
+	if app.Mode == ledger.ModeTest {
+		qrString = testQR(id, amount)
+	} else {
+		if m.Status != ledger.MerchantConnected {
+			return nil, false, &apiError{http.StatusServiceUnavailable, "MERCHANT_DISCONNECTED", "Merchant terputus dari Shopee, admin perlu login OTP ulang"}
+		}
+		if m.StaticQris == "" {
+			return nil, false, &apiError{http.StatusServiceUnavailable, "QRIS_NOT_SET", "QRIS statis merchant belum diatur"}
+		}
+		if qrString, err = qris.StaticToDynamicQris(m.StaticQris, amount); err != nil {
+			return nil, false, &apiError{http.StatusInternalServerError, "QRIS_ERROR", err.Error()}
+		}
+	}
+	now := s.Now().UTC()
+	inv, created, err := s.Store.CreateInvoice(ctx, ledger.Invoice{
+		ID: id, AppID: app.ID, MerchantID: m.ID,
+		OrderID: orderID, Amount: amount, Status: ledger.StatusPending, QRString: qrString,
+		CreatedAt: now, ExpiresAt: now.Add(time.Duration(expiry) * time.Minute), Mode: app.Mode,
+	})
+	if err != nil {
+		return nil, false, &apiError{http.StatusInternalServerError, "STORE_ERROR", "Gagal menyimpan tagihan"}
+	}
+	if !created && inv.Amount != amount {
+		return nil, false, &apiError{http.StatusConflict, "ORDER_EXISTS", "order_id sudah dipakai dengan nominal berbeda"}
+	}
+	view := invoiceView(inv)
+	if code, err := qr.Encode(inv.QRString, qr.M); err == nil {
+		view["qris_image_base64"] = "data:image/png;base64," + base64.StdEncoding.EncodeToString(code.PNG())
+	}
+	s.addCheckout(ctx, view, inv, app)
+	return view, created, nil
 }
 
 func (s *Server) getInvoice(w http.ResponseWriter, r *http.Request, app ledger.App, id string) {
@@ -599,7 +618,11 @@ func (s *Server) getInvoice(w http.ResponseWriter, r *http.Request, app ledger.A
 		writeErr(w, http.StatusInternalServerError, "STORE_ERROR", "Gagal membaca tagihan")
 		return
 	}
-	if inv.Status == ledger.StatusPending {
+	if inv.Status == ledger.StatusPending && inv.Mode == ledger.ModeTest {
+		if updated, err := s.settleTest(r.Context(), inv); err == nil {
+			inv = updated
+		}
+	} else if inv.Status == ledger.StatusPending {
 		updated, err := s.reconcile(r.Context(), inv)
 		if err != nil {
 			var gw *gatewayError

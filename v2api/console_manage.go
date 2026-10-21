@@ -369,6 +369,7 @@ func (s *Server) consoleCreateApp(w http.ResponseWriter, r *http.Request, org le
 	var req struct {
 		Name       string `json:"name"`
 		MerchantID string `json:"merchant_id"`
+		Mode       string `json:"mode"`
 	}
 	if !decode(w, r, &req) {
 		return
@@ -376,7 +377,7 @@ func (s *Server) consoleCreateApp(w http.ResponseWriter, r *http.Request, org le
 	if _, ok := s.orgMerchant(w, r, org, req.MerchantID); !ok {
 		return
 	}
-	app, key, apiErr := s.newApp(r.Context(), req.Name, req.MerchantID)
+	app, key, apiErr := s.newApp(r.Context(), req.Name, req.MerchantID, req.Mode)
 	if apiErr != nil {
 		apiErr.write(w)
 		return
@@ -434,7 +435,7 @@ func (s *Server) consoleAppAction(w http.ResponseWriter, r *http.Request, org le
 		writeJSON(w, http.StatusOK, map[string]any{"success": true, "app_id": app.ID})
 
 	case r.Method == http.MethodPost && action == "secret-key":
-		key, err := newSecretKey()
+		key, err := newSecretKeyFor(app.Mode)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "RANDOM", "Gagal membuat API key")
 			return
@@ -454,6 +455,12 @@ func (s *Server) consoleAppAction(w http.ResponseWriter, r *http.Request, org le
 
 	case r.Method == http.MethodPost && action == "webhook/test":
 		s.testWebhook(w, r, app.ID)
+
+	case r.Method == http.MethodPost && action == "test-invoice":
+		s.consoleTestInvoice(w, r, app)
+
+	case r.Method == http.MethodPost && len(rest) == 3 && rest[0] == "invoices" && rest[2] == "simulate":
+		s.consoleSimulate(w, r, app, rest[1])
 
 	default:
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", "Endpoint console tidak ditemukan")
