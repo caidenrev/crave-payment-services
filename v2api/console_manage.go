@@ -466,3 +466,20 @@ func (s *Server) consoleAppAction(w http.ResponseWriter, r *http.Request, org le
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", "Endpoint console tidak ditemukan")
 	}
 }
+
+// consoleCheckoutTheme: GET/PUT /api/v2/console/merchants/{id}/checkout-theme
+// untuk merchant milik org. Menyimpan butuh peran yang boleh mengelola aplikasi.
+func (s *Server) consoleCheckoutTheme(w http.ResponseWriter, r *http.Request, org ledger.Membership, merchantID string) {
+	if r.Method == http.MethodPut && !canManageApps(org.Role) {
+		forbidden(w)
+		return
+	}
+	if _, ok := s.orgMerchant(w, r, org, merchantID); !ok {
+		return
+	}
+	if r.Method == http.MethodPut {
+		s.putCheckoutTheme(w, r, merchantID)
+		return
+	}
+	s.getCheckoutTheme(w, r, merchantID)
+}

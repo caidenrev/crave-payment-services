@@ -233,6 +233,10 @@ func (s *Server) routeConsole(w http.ResponseWriter, r *http.Request, parts []st
 
 	case m == http.MethodPut && n == 3 && parts[0] == "merchants" && parts[2] == "static-qris":
 		s.consoleSetStaticQris(w, r, org, parts[1])
+	// tema popup / halaman bayar (checkout.go): lihat semua anggota, simpan owner/admin/developer
+	case n == 3 && parts[0] == "merchants" && parts[2] == "checkout-theme" && (m == http.MethodGet || m == http.MethodPut):
+		s.consoleCheckoutTheme(w, r, org, parts[1])
+
 	case m == http.MethodPost && n == 3 && parts[0] == "merchants" && parts[2] == "disconnect":
 		s.consoleDisconnectMerchant(w, r, org, parts[1])
 	case m == http.MethodDelete && n == 2 && parts[0] == "merchants":
