@@ -110,6 +110,7 @@ alter table gateway_merchants add column if not exists org_id text references ga
 create index if not exists gateway_invoices_merchant_created on gateway_invoices (merchant_id, created_at desc);
 alter table gateway_apps add column if not exists deleted_at timestamptz;
 alter table gateway_apps add column if not exists mode text not null default 'live';
+alter table gateway_apps add column if not exists last_used_at timestamptz;
 alter table gateway_invoices add column if not exists mode text not null default 'live';
 create table if not exists gateway_otp_sessions (
   id text primary key,
@@ -300,14 +301,17 @@ func (s *PostgresStore) CreateApp(ctx context.Context, app App, keyHash string) 
 	return err
 }
 
-const appCols = `id, name, merchant_id, coalesce(client_key,''), coalesce(webhook_url,''), webhook_secret_enc, created_at, mode`
+const appCols = `id, name, merchant_id, coalesce(client_key,''), coalesce(webhook_url,''), webhook_secret_enc, created_at, mode, coalesce(last_used_at, 'epoch'::timestamptz)`
 
 func (s *PostgresStore) scanApp(row rowScanner) (App, error) {
 	var a App
 	var secretEnc []byte
-	err := row.Scan(&a.ID, &a.Name, &a.MerchantID, &a.ClientKey, &a.WebhookURL, &secretEnc, &a.CreatedAt, &a.Mode)
+	err := row.Scan(&a.ID, &a.Name, &a.MerchantID, &a.ClientKey, &a.WebhookURL, &secretEnc, &a.CreatedAt, &a.Mode, &a.LastUsedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return a, ErrNotFound
+	}
+	if a.LastUsedAt.Unix() == 0 {
+		a.LastUsedAt = time.Time{}
 	}
 	if err != nil {
 		return a, err
@@ -345,6 +349,13 @@ func (s *PostgresStore) ListApps(ctx context.Context) ([]App, error) {
 		out = append(out, a)
 	}
 	return out, rows.Err()
+}
+
+func (s *PostgresStore) TouchApp(ctx context.Context, appID string, at time.Time) error {
+	// paling sering sekali per menit per aplikasi, supaya tiap request tidak menulis
+	_, err := s.db.ExecContext(ctx, `update gateway_apps set last_used_at = $2
+		where id = $1 and (last_used_at is null or last_used_at < $2 - interval '1 minute')`, appID, at)
+	return err
 }
 
 func (s *PostgresStore) SetClientKey(ctx context.Context, appID, clientKey string) error {

@@ -88,6 +88,8 @@ type App struct {
 	// Mode is ModeLive or ModeTest. Test apps never touch Shopee: their invoices
 	// carry a non-payable QR and are settled only by simulation.
 	Mode string
+	// LastUsedAt is when the secret key last authenticated a request (zero = never).
+	LastUsedAt time.Time
 	// WebhookURL menerima event tagihan; WebhookSecret (disimpan terenkripsi)
 	// menandatangani setiap kiriman. Keduanya kosong = webhook mati.
 	WebhookURL    string
@@ -176,6 +178,9 @@ type Store interface {
 	ListApps(ctx context.Context) ([]App, error)
 	// SetClientKey creates or replaces an app's public client key.
 	SetClientKey(ctx context.Context, appID, clientKey string) error
+	// TouchApp records that the app's secret key was used at `at`. Implementations
+	// may skip the write when the stored time is less than a minute older.
+	TouchApp(ctx context.Context, appID string, at time.Time) error
 
 	// CreateInvoice is idempotent per (AppID, OrderID): an existing invoice is
 	// returned with created=false.

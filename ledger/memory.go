@@ -381,6 +381,16 @@ func (s *MemoryStore) AppByID(_ context.Context, id string) (App, error) {
 	return a, nil
 }
 
+func (s *MemoryStore) TouchApp(_ context.Context, appID string, at time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if a, ok := s.apps[appID]; ok && (a.LastUsedAt.IsZero() || a.LastUsedAt.Before(at.Add(-time.Minute))) {
+		a.LastUsedAt = at
+		s.apps[appID] = a
+	}
+	return nil
+}
+
 func (s *MemoryStore) SetClientKey(_ context.Context, appID, clientKey string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

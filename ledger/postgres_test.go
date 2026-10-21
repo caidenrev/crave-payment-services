@@ -84,6 +84,15 @@ func TestPostgresCheckout(t *testing.T) {
 	if err := st.SetClientKey(ctx, appID, "pgk_pub_new_"+sfx); err != nil {
 		t.Fatal(err)
 	}
+	// terakhir dipakai: ditulis, lalu tidak ditimpa dalam satu menit
+	used := now.Truncate(time.Second)
+	if err := st.TouchApp(ctx, appID, used); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.TouchApp(ctx, appID, used.Add(20*time.Second))
+	if a, _ := st.AppByID(ctx, appID); !a.LastUsedAt.Equal(used) {
+		t.Fatalf("last used: %v want %v", a.LastUsedAt, used)
+	}
 	if err := st.SetClientKey(ctx, "app_tidakada_"+sfx, "x"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("SetClientKey unknown app: %v", err)
 	}
