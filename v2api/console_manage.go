@@ -456,6 +456,12 @@ func (s *Server) consoleAppAction(w http.ResponseWriter, r *http.Request, org le
 	case r.Method == http.MethodPost && action == "webhook/test":
 		s.testWebhook(w, r, app.ID)
 
+	case r.Method == http.MethodGet && action == "webhook/events":
+		s.writeWebhookEvents(w, r, app.ID)
+
+	case r.Method == http.MethodPost && len(rest) == 4 && rest[0] == "webhook" && rest[1] == "events" && rest[3] == "resend":
+		s.resendWebhookEvent(w, r, app, rest[2])
+
 	case r.Method == http.MethodPost && action == "test-invoice":
 		s.consoleTestInvoice(w, r, app)
 

@@ -87,6 +87,8 @@ create table if not exists gateway_webhook_events (
   unique (invoice_id, type)
 );
 create index if not exists gateway_webhook_events_due on gateway_webhook_events (next_attempt_at) where status = 'pending';
+alter table gateway_webhook_events add column if not exists last_status int not null default 0;
+alter table gateway_webhook_events add column if not exists last_attempt_at timestamptz;
 create index if not exists gateway_invoices_sweep on gateway_invoices (created_at) where status = 'pending';
 create table if not exists gateway_orgs (
   id text primary key,
@@ -462,16 +464,19 @@ func (s *PostgresStore) SetWebhook(ctx context.Context, appID, url, secret strin
 	return nil
 }
 
-const eventCols = `id, app_id, invoice_id, type, payload::text, status, attempts, next_attempt_at, last_error, created_at, delivered_at`
+const eventCols = `id, app_id, invoice_id, type, payload::text, status, attempts, next_attempt_at, last_error, created_at, delivered_at, last_status, coalesce(last_attempt_at, 'epoch'::timestamptz)`
 
 func scanEvent(row rowScanner) (WebhookEvent, error) {
 	var ev WebhookEvent
 	var payload string
 	var delivered sql.NullTime
 	err := row.Scan(&ev.ID, &ev.AppID, &ev.InvoiceID, &ev.Type, &payload, &ev.Status, &ev.Attempts,
-		&ev.NextAttemptAt, &ev.LastError, &ev.CreatedAt, &delivered)
+		&ev.NextAttemptAt, &ev.LastError, &ev.CreatedAt, &delivered, &ev.LastStatus, &ev.LastAttemptAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ev, ErrNotFound
+	}
+	if ev.LastAttemptAt.Unix() == 0 {
+		ev.LastAttemptAt = time.Time{}
 	}
 	ev.Payload = []byte(payload)
 	if delivered.Valid {
@@ -524,10 +529,18 @@ func (s *PostgresStore) LeaseDueEvents(ctx context.Context, now time.Time, lease
 }
 
 func (s *PostgresStore) SaveEventAttempt(ctx context.Context, ev WebhookEvent) error {
+	var attemptAt any
+	if !ev.LastAttemptAt.IsZero() {
+		attemptAt = ev.LastAttemptAt
+	}
 	_, err := s.db.ExecContext(ctx, `update gateway_webhook_events
-		set status = $2, attempts = $3, next_attempt_at = $4, last_error = $5, delivered_at = $6 where id = $1`,
-		ev.ID, ev.Status, ev.Attempts, ev.NextAttemptAt, ev.LastError, ev.DeliveredAt)
+		set status = $2, attempts = $3, next_attempt_at = $4, last_error = $5, delivered_at = $6, last_status = $7, last_attempt_at = $8 where id = $1`,
+		ev.ID, ev.Status, ev.Attempts, ev.NextAttemptAt, ev.LastError, ev.DeliveredAt, ev.LastStatus, attemptAt)
 	return err
+}
+
+func (s *PostgresStore) GetEvent(ctx context.Context, appID, id string) (WebhookEvent, error) {
+	return scanEvent(s.db.QueryRowContext(ctx, `select `+eventCols+` from gateway_webhook_events where id = $1 and app_id = $2`, id, appID))
 }
 
 func (s *PostgresStore) ListEvents(ctx context.Context, appID string, limit int) ([]WebhookEvent, error) {

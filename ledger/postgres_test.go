@@ -189,12 +189,19 @@ func TestPostgresCheckout(t *testing.T) {
 	}
 	delivered := now.Add(time.Second)
 	ev.Status, ev.Attempts, ev.DeliveredAt = EventDelivered, 1, &delivered
+	ev.LastStatus, ev.LastAttemptAt = 204, delivered
 	if err := st.SaveEventAttempt(ctx, ev); err != nil {
 		t.Fatal(err)
 	}
 	list, err := st.ListEvents(ctx, appID, 10)
 	if err != nil || len(list) != 1 || list[0].Status != EventDelivered || list[0].DeliveredAt == nil || string(list[0].Payload) != `{"a": 1}` {
 		t.Fatalf("list events: %+v %v", list, err)
+	}
+	if got, err := st.GetEvent(ctx, appID, ev.ID); err != nil || got.LastStatus != 204 || !got.LastAttemptAt.Equal(delivered) {
+		t.Fatalf("get event: %+v %v", got, err)
+	}
+	if _, err := st.GetEvent(ctx, "app_lain", ev.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("event of another app: %v", err)
 	}
 }
 
