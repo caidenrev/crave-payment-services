@@ -198,6 +198,10 @@ func (s *Server) routeConsole(w http.ResponseWriter, r *http.Request, parts []st
 		s.consoleMe(w, r, user)
 		return
 	}
+	if len(parts) == 1 && parts[0] == "orgs" && r.Method == http.MethodPost {
+		s.consoleCreateOrg(w, r, user)
+		return
+	}
 	org, ok := s.consoleOrg(w, r, user)
 	if !ok {
 		return
