@@ -120,7 +120,7 @@ func eventBody(id, typ string, at time.Time, data map[string]any) []byte {
 func invoiceEventData(inv ledger.Invoice) map[string]any {
 	data := map[string]any{
 		"id": inv.ID, "order_id": inv.OrderID, "amount": inv.Amount, "status": inv.Status,
-		"created_at": inv.CreatedAt, "expires_at": inv.ExpiresAt,
+		"created_at": inv.CreatedAt, "expires_at": inv.ExpiresAt, "mode": ledger.NormalizeMode(inv.Mode),
 	}
 	if inv.PaidAt != nil {
 		data["paid_at"] = *inv.PaidAt
@@ -256,8 +256,24 @@ func (s *Server) sweep(w http.ResponseWriter, r *http.Request) {
 		if len(claimed) == 0 {
 			continue
 		}
-		feed, feedErr := s.merchantFeed(ctx, merchantID, earliest.Add(-time.Minute))
+		// tagihan test tidak pernah mengecek Shopee, hanya bisa kedaluwarsa
+		var live []ledger.Invoice
 		for _, inv := range claimed {
+			if inv.Mode != ledger.ModeTest {
+				live = append(live, inv)
+				continue
+			}
+			out, err := s.settleTest(ctx, inv)
+			sum["checked"]++
+			if err == nil && out.Status == ledger.StatusExpired {
+				sum["expired"]++
+			}
+		}
+		if len(live) == 0 {
+			continue
+		}
+		feed, feedErr := s.merchantFeed(ctx, merchantID, earliest.Add(-time.Minute))
+		for _, inv := range live {
 			out, err := s.settleWith(ctx, inv, feed, feedErr)
 			sum["checked"]++
 			switch {

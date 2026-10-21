@@ -107,6 +107,8 @@ alter table gateway_org_members add column if not exists joined_at timestamptz;
 alter table gateway_merchants add column if not exists org_id text references gateway_orgs(id);
 create index if not exists gateway_invoices_merchant_created on gateway_invoices (merchant_id, created_at desc);
 alter table gateway_apps add column if not exists deleted_at timestamptz;
+alter table gateway_apps add column if not exists mode text not null default 'live';
+alter table gateway_invoices add column if not exists mode text not null default 'live';
 create table if not exists gateway_otp_sessions (
   id text primary key,
   org_id text not null,
@@ -291,17 +293,17 @@ func (s *PostgresStore) WithMerchantLock(ctx context.Context, id string, fn func
 }
 
 func (s *PostgresStore) CreateApp(ctx context.Context, app App, keyHash string) error {
-	_, err := s.db.ExecContext(ctx, `insert into gateway_apps (id, name, merchant_id, key_hash, client_key) values ($1,$2,$3,$4, nullif($5,''))`,
-		app.ID, app.Name, app.MerchantID, keyHash, app.ClientKey)
+	_, err := s.db.ExecContext(ctx, `insert into gateway_apps (id, name, merchant_id, key_hash, client_key, mode) values ($1,$2,$3,$4, nullif($5,''), $6)`,
+		app.ID, app.Name, app.MerchantID, keyHash, app.ClientKey, NormalizeMode(app.Mode))
 	return err
 }
 
-const appCols = `id, name, merchant_id, coalesce(client_key,''), coalesce(webhook_url,''), webhook_secret_enc, created_at`
+const appCols = `id, name, merchant_id, coalesce(client_key,''), coalesce(webhook_url,''), webhook_secret_enc, created_at, mode`
 
 func (s *PostgresStore) scanApp(row rowScanner) (App, error) {
 	var a App
 	var secretEnc []byte
-	err := row.Scan(&a.ID, &a.Name, &a.MerchantID, &a.ClientKey, &a.WebhookURL, &secretEnc, &a.CreatedAt)
+	err := row.Scan(&a.ID, &a.Name, &a.MerchantID, &a.ClientKey, &a.WebhookURL, &secretEnc, &a.CreatedAt, &a.Mode)
 	if errors.Is(err, sql.ErrNoRows) {
 		return a, ErrNotFound
 	}
@@ -354,13 +356,13 @@ func (s *PostgresStore) SetClientKey(ctx context.Context, appID, clientKey strin
 	return nil
 }
 
-const invoiceCols = `id, app_id, merchant_id, order_id, amount, status, qris_string, created_at, expires_at, paid_at, coalesce(transaction_id,''), coalesce(payment_type,'')`
+const invoiceCols = `id, app_id, merchant_id, order_id, amount, status, qris_string, created_at, expires_at, paid_at, coalesce(transaction_id,''), coalesce(payment_type,''), mode`
 
 func scanInvoice(row rowScanner) (Invoice, error) {
 	var inv Invoice
 	var paid sql.NullTime
 	err := row.Scan(&inv.ID, &inv.AppID, &inv.MerchantID, &inv.OrderID, &inv.Amount, &inv.Status, &inv.QRString,
-		&inv.CreatedAt, &inv.ExpiresAt, &paid, &inv.TransactionID, &inv.PaymentType)
+		&inv.CreatedAt, &inv.ExpiresAt, &paid, &inv.TransactionID, &inv.PaymentType, &inv.Mode)
 	if errors.Is(err, sql.ErrNoRows) {
 		return inv, ErrNotFound
 	}
@@ -373,10 +375,10 @@ func scanInvoice(row rowScanner) (Invoice, error) {
 
 func (s *PostgresStore) CreateInvoice(ctx context.Context, inv Invoice) (Invoice, bool, error) {
 	res, err := s.db.ExecContext(ctx, `
-		insert into gateway_invoices (id, app_id, merchant_id, order_id, amount, status, qris_string, created_at, expires_at)
-		values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+		insert into gateway_invoices (id, app_id, merchant_id, order_id, amount, status, qris_string, created_at, expires_at, mode)
+		values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 		on conflict (app_id, order_id) do nothing`,
-		inv.ID, inv.AppID, inv.MerchantID, inv.OrderID, inv.Amount, inv.Status, inv.QRString, inv.CreatedAt, inv.ExpiresAt)
+		inv.ID, inv.AppID, inv.MerchantID, inv.OrderID, inv.Amount, inv.Status, inv.QRString, inv.CreatedAt, inv.ExpiresAt, NormalizeMode(inv.Mode))
 	if err != nil {
 		return inv, false, err
 	}

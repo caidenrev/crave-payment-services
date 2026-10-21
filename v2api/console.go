@@ -318,7 +318,7 @@ func (s *Server) consoleApps(w http.ResponseWriter, r *http.Request, org ledger.
 		// tanpa secret key maupun secret webhook
 		out = append(out, map[string]any{
 			"id": a.ID, "name": a.Name, "merchant_id": a.MerchantID, "client_key": a.ClientKey,
-			"webhook_url": a.WebhookURL, "created_at": a.CreatedAt,
+			"webhook_url": a.WebhookURL, "created_at": a.CreatedAt, "mode": ledger.NormalizeMode(a.Mode),
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"apps": out})
@@ -349,6 +349,7 @@ func (s *Server) consoleInvoices(w http.ResponseWriter, r *http.Request, org led
 		item := map[string]any{
 			"id": inv.ID, "app_id": inv.AppID, "merchant_id": inv.MerchantID, "order_id": inv.OrderID,
 			"amount": inv.Amount, "status": inv.Status, "created_at": inv.CreatedAt, "expires_at": inv.ExpiresAt,
+			"mode": ledger.NormalizeMode(inv.Mode),
 		}
 		if inv.PaidAt != nil {
 			item["paid_at"] = *inv.PaidAt

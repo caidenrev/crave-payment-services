@@ -82,7 +82,7 @@ func (s *Server) addCheckout(ctx context.Context, view map[string]any, inv ledge
 	if app.ClientKey == "" {
 		// Aplikasi yang dibuat sebelum client key ada: buatkan sekarang, supaya
 		// popup langsung bisa dipakai tanpa langkah admin. Secret key tidak berubah.
-		if key, err := newClientKey(); err == nil && s.Store.SetClientKey(ctx, app.ID, key) == nil {
+		if key, err := newClientKeyFor(app.Mode); err == nil && s.Store.SetClientKey(ctx, app.ID, key) == nil {
 			app.ClientKey = key
 		}
 	}
@@ -132,7 +132,11 @@ func (s *Server) publicCheckout(w http.ResponseWriter, r *http.Request, token st
 			writeErr(w, http.StatusInternalServerError, "STORE_ERROR", "Gagal memperbarui tagihan")
 			return
 		}
-		if check {
+		if check && inv.Mode == ledger.ModeTest {
+			if updated, err := s.settleTest(ctx, inv); err == nil {
+				inv = updated
+			}
+		} else if check {
 			updated, err := s.reconcile(ctx, inv)
 			var gw *gatewayError
 			switch {
@@ -149,7 +153,7 @@ func (s *Server) publicCheckout(w http.ResponseWriter, r *http.Request, token st
 
 	out := map[string]any{
 		"order_id": inv.OrderID, "amount": inv.Amount, "status": inv.Status,
-		"created_at": inv.CreatedAt, "expires_at": inv.ExpiresAt,
+		"created_at": inv.CreatedAt, "expires_at": inv.ExpiresAt, "mode": ledger.NormalizeMode(inv.Mode),
 		"merchant": map[string]any{"name": ""},
 		"theme":    nil,
 	}
@@ -171,7 +175,11 @@ func (s *Server) publicCheckout(w http.ResponseWriter, r *http.Request, token st
 /* ------------------------------------------------------------- admin */
 
 func (s *Server) rollClientKey(w http.ResponseWriter, r *http.Request, appID string) {
-	key, err := newClientKey()
+	mode := ledger.ModeLive
+	if app, err := s.Store.AppByID(r.Context(), appID); err == nil {
+		mode = app.Mode
+	}
+	key, err := newClientKeyFor(mode)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "RANDOM", "Gagal membuat client key")
 		return

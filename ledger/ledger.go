@@ -85,6 +85,9 @@ type App struct {
 	Name       string
 	MerchantID string
 	ClientKey  string
+	// Mode is ModeLive or ModeTest. Test apps never touch Shopee: their invoices
+	// carry a non-payable QR and are settled only by simulation.
+	Mode string
 	// WebhookURL menerima event tagihan; WebhookSecret (disimpan terenkripsi)
 	// menandatangani setiap kiriman. Keduanya kosong = webhook mati.
 	WebhookURL    string
@@ -129,6 +132,22 @@ type Invoice struct {
 	PaidAt        *time.Time
 	TransactionID string
 	PaymentType   string
+	// Mode is copied from the app at creation (ModeLive or ModeTest).
+	Mode string
+}
+
+// App / invoice modes.
+const (
+	ModeLive = "live"
+	ModeTest = "test"
+)
+
+// NormalizeMode maps anything but ModeTest to ModeLive.
+func NormalizeMode(m string) string {
+	if m == ModeTest {
+		return ModeTest
+	}
+	return ModeLive
 }
 
 // Store persists gateway state. Implementations must make ClaimTransaction
