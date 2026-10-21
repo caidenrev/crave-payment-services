@@ -327,6 +327,7 @@ func (s *Server) consoleApps(w http.ResponseWriter, r *http.Request, org ledger.
 		out = append(out, map[string]any{
 			"id": a.ID, "name": a.Name, "merchant_id": a.MerchantID, "client_key": a.ClientKey,
 			"webhook_url": a.WebhookURL, "created_at": a.CreatedAt, "mode": ledger.NormalizeMode(a.Mode),
+			"last_used_at": nullTime(a.LastUsedAt),
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"apps": out})

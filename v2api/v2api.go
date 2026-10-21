@@ -103,6 +103,8 @@ type Server struct {
 	EmailFrom    string
 	// Notifier mengganti pengirim email pemberitahuan (untuk tes).
 	Notifier AccessNotifier
+	// Mail mengganti pengirim email operasional ke anggota org (untuk tes).
+	Mail Mailer
 }
 
 type providerClient struct{ p *shopee.Provider }
@@ -246,6 +248,7 @@ func (s *Server) authApp(w http.ResponseWriter, r *http.Request) (ledger.App, bo
 		writeErr(w, http.StatusInternalServerError, "STORE_ERROR", "Gagal memeriksa API key")
 		return app, false
 	}
+	_ = s.Store.TouchApp(r.Context(), app.ID, s.Now().UTC()) // "terakhir dipakai" di console
 	return app, true
 }
 
@@ -703,6 +706,12 @@ func (s *Server) merchantFeed(ctx context.Context, merchantID string, start time
 	now := s.Now().UTC()
 	var feed []core.MerchantTransaction
 	var feedErr error
+	var expired ledger.Merchant // terisi bila sesi Shopee baru saja habis
+	defer func() {
+		if expired.ID != "" {
+			s.notifyMerchantExpired(ctx, expired)
+		}
+	}()
 
 	err := s.Store.WithMerchantLock(ctx, merchantID, func(m *ledger.Merchant) error {
 		if m.Status != ledger.MerchantConnected {
@@ -723,6 +732,7 @@ func (s *Server) merchantFeed(ctx context.Context, merchantID string, start time
 			if rerr := client.Refresh(ctx); rerr != nil {
 				if core.IsErrorCode(rerr, core.CodeAuthRequired) {
 					m.Status = ledger.MerchantDisconnected
+					expired = *m
 					feedErr = &gatewayError{"MERCHANT_DISCONNECTED"}
 				} else {
 					feedErr = &gatewayError{"SHOPEE_UNAVAILABLE"}
