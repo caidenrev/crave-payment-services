@@ -247,6 +247,8 @@ type Store interface {
 	TakeOtpSession(ctx context.Context, id, orgID, userID string, now time.Time) (OtpSession, error)
 	// CountOtpSessions counts OTP challenges a user requested since (rate limit).
 	CountOtpSessions(ctx context.Context, userID string, since time.Time) (int, error)
+
+	AccessStore
 }
 
 // OtpSession is short-lived Shopee login state (OTP challenge or verification)

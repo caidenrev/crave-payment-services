@@ -24,6 +24,7 @@ type MemoryStore struct {
 	orgs      map[string]Org
 	members   map[string]Membership // orgID + "/" + userID
 	otp       map[string]memOtp
+	access    map[string]AccessRequest
 }
 
 type memOtp struct {
@@ -51,6 +52,7 @@ func NewMemoryStore() *MemoryStore {
 		orgs:      map[string]Org{},
 		members:   map[string]Membership{},
 		otp:       map[string]memOtp{},
+		access:    map[string]AccessRequest{},
 	}
 }
 

@@ -43,6 +43,7 @@ func openTestPostgres(t *testing.T) (*PostgresStore, string) {
 			// klaim merchant di tes ikut mengenai salinan merchant lain di branch: kembalikan dulu
 			`update gateway_merchants set org_id = null where org_id like '%' || $1`,
 			`delete from gateway_otp_sessions where id like '%' || $1`,
+			`delete from gateway_access_requests where id like '%' || $1`,
 			`delete from gateway_org_members where org_id like '%' || $1`,
 			`delete from gateway_orgs where id like '%' || $1`,
 			`delete from gateway_webhook_events where app_id like '%' || $1`,
@@ -407,4 +408,47 @@ func containsEvent(list []WebhookEvent, id string) bool {
 		}
 	}
 	return false
+}
+
+func TestPostgresAccessRequests(t *testing.T) {
+	st, sfx := openTestPostgres(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	a, b := "acr_a_"+sfx, "acr_b_"+sfx
+	ip := "ip_" + sfx
+	for i, id := range []string{a, b} {
+		if err := st.CreateAccessRequest(ctx, AccessRequest{ID: id, Name: "Uji", Email: id + "@Uji.id", Phone: "0812", Reason: "uji coba akses", IPHash: ip, CreatedAt: now.Add(time.Duration(i) * time.Second)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n, err := st.CountAccessRequests(ctx, ip, now.Add(-time.Minute)); err != nil || n != 2 {
+		t.Fatalf("count: %d %v", n, err)
+	}
+	if got, err := st.PendingAccessRequestByEmail(ctx, a+"@uji.id"); err != nil || got.ID != a {
+		t.Fatalf("pending by email (case-insensitive): %+v %v", got, err)
+	}
+	if ok, err := st.DecideAccessRequest(ctx, a, AccessApproved, "org_x_"+sfx, "founder@uji.id", now); err != nil || !ok {
+		t.Fatalf("decide: %v %v", ok, err)
+	}
+	if ok, _ := st.DecideAccessRequest(ctx, a, AccessRejected, "", "x", now); ok {
+		t.Fatal("decided request must not change again")
+	}
+	got, err := st.GetAccessRequest(ctx, a)
+	if err != nil || got.Status != AccessApproved || got.OrgID != "org_x_"+sfx || got.DecidedAt.IsZero() {
+		t.Fatalf("after decide: %+v %v", got, err)
+	}
+	if _, err := st.PendingAccessRequestByEmail(ctx, a+"@uji.id"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("approved request is not pending: %v", err)
+	}
+	list, err := st.ListAccessRequests(ctx, AccessPending, 500)
+	found := false
+	for _, r := range list {
+		found = found || r.ID == b
+		if r.ID == a {
+			t.Fatal("approved request in pending list")
+		}
+	}
+	if err != nil || !found {
+		t.Fatalf("pending list: %v %v", found, err)
+	}
 }

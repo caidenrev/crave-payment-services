@@ -96,6 +96,13 @@ type Server struct {
 	SupabaseServiceKey string
 	// Inviter mengganti pengirim undangan Supabase (untuk tes); nil = Supabase.
 	Inviter TeamInviter
+	// ResendAPIKey (rahasia) mengirim email pemberitahuan permintaan akses ke
+	// NotifyEmail (bawaan: BootstrapEmail) dari EmailFrom.
+	ResendAPIKey string
+	NotifyEmail  string
+	EmailFrom    string
+	// Notifier mengganti pengirim email pemberitahuan (untuk tes).
+	Notifier AccessNotifier
 }
 
 type providerClient struct{ p *shopee.Provider }
@@ -141,6 +148,9 @@ func Handle(w http.ResponseWriter, r *http.Request) {
 		BootstrapEmail:  strings.TrimSpace(os.Getenv("CONSOLE_BOOTSTRAP_EMAIL")),
 
 		SupabaseServiceKey: strings.TrimSpace(os.Getenv("SUPABASE_SERVICE_ROLE_KEY")),
+		ResendAPIKey:       strings.TrimSpace(os.Getenv("RESEND_API_KEY")),
+		NotifyEmail:        strings.TrimSpace(os.Getenv("ACCESS_REQUEST_NOTIFY_EMAIL")),
+		EmailFrom:          strings.TrimSpace(os.Getenv("EMAIL_FROM")),
 	}
 	s.ServeHTTP(w, r)
 }
@@ -169,6 +179,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.sweep(w, r)
+
+	case parts[0] == "public":
+		s.routePublic(w, r, parts[1:])
 
 	case parts[0] == "checkout":
 		if len(parts) != 2 || parts[1] == "" || r.Method != http.MethodGet {

@@ -142,7 +142,7 @@ func OpenPostgres(ctx context.Context, dsn string, c *Cipher) (*PostgresStore, e
 	db.SetMaxOpenConns(4)
 	db.SetMaxIdleConns(2)
 	db.SetConnMaxIdleTime(30 * time.Second)
-	if _, err := db.ExecContext(ctx, schema); err != nil {
+	if _, err := db.ExecContext(ctx, schema+accessSchema); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("ledger migrate: %w", err)
 	}

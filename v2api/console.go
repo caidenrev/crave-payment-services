@@ -227,6 +227,10 @@ func (s *Server) routeConsole(w http.ResponseWriter, r *http.Request, parts []st
 	case n >= 1 && parts[0] == "members":
 		s.routeMembers(w, r, org, user, parts[1:])
 
+	// permintaan akses dari landing page (access.go), khusus platform admin
+	case n >= 1 && parts[0] == "access-requests":
+		s.routeAccessRequests(w, r, org, user, parts[1:])
+
 	case m == http.MethodPut && n == 3 && parts[0] == "merchants" && parts[2] == "static-qris":
 		s.consoleSetStaticQris(w, r, org, parts[1])
 	case m == http.MethodPost && n == 3 && parts[0] == "merchants" && parts[2] == "disconnect":
