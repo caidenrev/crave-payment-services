@@ -30,7 +30,8 @@ const (
 // Merchant statuses.
 const (
 	MerchantConnected    = "connected"
-	MerchantDisconnected = "disconnected"
+	MerchantDisconnected = "disconnected" // sesi Shopee habis/ditolak, perlu login ulang
+	MerchantLoggedOut    = "logged_out"   // sengaja di-logout dari console
 )
 
 // Merchant is a Shopee merchant store whose session the gateway owns.

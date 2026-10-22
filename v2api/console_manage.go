@@ -302,7 +302,8 @@ func (s *Server) consoleSetStaticQris(w http.ResponseWriter, r *http.Request, or
 }
 
 // consoleDisconnectMerchant logout merchant dari Shopee: sesi dihapus, status
-// terputus. Merchant & aplikasinya tetap; tagihan baru ditolak sampai login ulang via OTP.
+// logged_out (dibedakan dari sesi yang habis sendiri). Merchant & aplikasinya
+// tetap; tagihan baru ditolak sampai login ulang via OTP.
 func (s *Server) consoleDisconnectMerchant(w http.ResponseWriter, r *http.Request, org ledger.Membership, merchantID string) {
 	if !canManageMerchants(org.Role) {
 		forbidden(w)
@@ -313,14 +314,14 @@ func (s *Server) consoleDisconnectMerchant(w http.ResponseWriter, r *http.Reques
 	}
 	err := s.Store.WithMerchantLock(r.Context(), merchantID, func(m *ledger.Merchant) error {
 		m.SessionJSON = nil
-		m.Status = ledger.MerchantDisconnected
+		m.Status = ledger.MerchantLoggedOut
 		return nil
 	})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "STORE_ERROR", "Gagal memutuskan merchant")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"success": true, "status": ledger.MerchantDisconnected})
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "status": ledger.MerchantLoggedOut})
 }
 
 // consoleReleaseMerchant menghapus merchant dari org. Ditolak bila masih ada
