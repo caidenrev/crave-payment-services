@@ -596,7 +596,11 @@ func (s *Server) issueInvoice(ctx context.Context, app ledger.App, orderID strin
 		qrString = testQR(id, amount)
 	} else {
 		if m.Status != ledger.MerchantConnected {
-			return nil, false, &apiError{http.StatusServiceUnavailable, "MERCHANT_DISCONNECTED", "Merchant terputus dari Shopee, admin perlu login OTP ulang"}
+			msg := "Merchant terputus dari Shopee, admin perlu login OTP ulang"
+			if m.Status == ledger.MerchantLoggedOut {
+				msg = "Merchant sudah logout dari Shopee, login OTP ulang di console untuk mengaktifkannya"
+			}
+			return nil, false, &apiError{http.StatusServiceUnavailable, "MERCHANT_DISCONNECTED", msg}
 		}
 		if m.StaticQris == "" {
 			return nil, false, &apiError{http.StatusServiceUnavailable, "QRIS_NOT_SET", "QRIS statis merchant belum diatur"}

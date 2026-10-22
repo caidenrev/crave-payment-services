@@ -368,11 +368,11 @@ func TestConsoleDisconnectAndReleaseMerchant(t *testing.T) {
 	key, appID := a["api_key"].(string), a["app"].(map[string]any)["id"].(string)
 
 	// putuskan: sesi Shopee dihapus, tagihan baru ditolak, aplikasi tetap ada
-	if code, out, _ := e.consoleCall("POST", "tok-founder", "merchants/mch_777_88/disconnect", nil); code != http.StatusOK || out["status"] != "disconnected" {
+	if code, out, _ := e.consoleCall("POST", "tok-founder", "merchants/mch_777_88/disconnect", nil); code != http.StatusOK || out["status"] != "logged_out" {
 		t.Fatalf("disconnect: %d %v", code, out)
 	}
 	m, _ := e.st.GetMerchant(ctx, "mch_777_88")
-	if m.Status != ledger.MerchantDisconnected || len(m.SessionJSON) != 0 || m.StaticQris == "" {
+	if m.Status != ledger.MerchantLoggedOut || len(m.SessionJSON) != 0 || m.StaticQris == "" {
 		t.Fatalf("after disconnect: %+v", m)
 	}
 	if code, _ := e.do("POST", "/api/v2/invoices", key, map[string]any{"order_id": "o-x", "amount": 10000}); code < 400 {
